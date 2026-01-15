@@ -24,7 +24,7 @@ class MockAgent:
         self.response = response
         self.call_count = 0
 
-    async def ainvoke(self, input_data: dict) -> dict:
+    async def ainvoke(self, input_data: dict, **kwargs) -> dict:
         """Mock invoke that returns a predefined response."""
         self.call_count += 1
         return {"messages": [type("Message", (), {"content": self.response})()]}
