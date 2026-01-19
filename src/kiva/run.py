@@ -25,7 +25,19 @@ from kiva.graph import build_orchestrator_graph
 
 
 def _should_emit(event_type: EventType, filter_set: set[EventType] | None) -> bool:
-    """Check if event should be emitted based on filter."""
+    """Check if event should be emitted based on filter.
+
+    This function is designed to be called BEFORE event creation to avoid
+    unnecessary object allocations when events will be filtered out.
+
+    Args:
+        event_type: The type of event to check.
+        filter_set: Optional set of event types to emit. If None, all events
+            are emitted.
+
+    Returns:
+        True if the event should be emitted, False otherwise.
+    """
     return filter_set is None or event_type in filter_set
 
 
@@ -127,20 +139,18 @@ async def run(
         "max_parallel_agents": max_parallel_agents,
     }
 
-    # Emit execution_start event
-    start_event = factory.execution_start(prompt, agents, config_data)
-    if _should_emit(start_event.type, event_filter):
-        yield start_event
+    # Emit execution_start event - check filter before creating
+    if _should_emit(EventType.EXECUTION_START, event_filter):
+        yield factory.execution_start(prompt, agents, config_data)
 
-    # Phase change: initializing -> analyzing
-    phase_event = factory.phase_change(
-        EventPhase.INITIALIZING,
-        EventPhase.ANALYZING,
-        10,
-        "Starting task analysis",
-    )
-    if _should_emit(phase_event.type, event_filter):
-        yield phase_event
+    # Phase change: initializing -> analyzing - check filter before creating
+    if _should_emit(EventType.PHASE_CHANGE, event_filter):
+        yield factory.phase_change(
+            EventPhase.INITIALIZING,
+            EventPhase.ANALYZING,
+            10,
+            "Starting task analysis",
+        )
 
     initial_state = {
         "prompt": prompt,
@@ -185,27 +195,25 @@ async def run(
                     agent_results_count = event.data.get("results_count", 0)
                 yield event
 
-        # Emit execution_end event on success
-        end_event = factory.execution_end(
-            result=final_result or "",
-            agent_results_count=agent_results_count,
-            success=True,
-        )
-        if _should_emit(end_event.type, event_filter):
-            yield end_event
+        # Emit execution_end event on success - check filter before creating
+        if _should_emit(EventType.EXECUTION_END, event_filter):
+            yield factory.execution_end(
+                result=final_result or "",
+                agent_results_count=agent_results_count,
+                success=True,
+            )
 
     except Exception as e:
-        # Emit execution_error event
-        import traceback
+        # Emit execution_error event - check filter before creating
+        if _should_emit(EventType.EXECUTION_ERROR, event_filter):
+            import traceback
 
-        error_event = factory.execution_error(
-            error_type=type(e).__name__,
-            error_message=str(e),
-            stack_trace=traceback.format_exc(),
-            recovery_suggestion=_get_recovery_suggestion(e),
-        )
-        if _should_emit(error_event.type, event_filter):
-            yield error_event
+            yield factory.execution_error(
+                error_type=type(e).__name__,
+                error_message=str(e),
+                stack_trace=traceback.format_exc(),
+                recovery_suggestion=_get_recovery_suggestion(e),
+            )
         raise
 
 
@@ -233,18 +241,22 @@ async def _process_stream_chunk(
     factory: EventFactory,
     event_filter: set[EventType] | None,
 ) -> AsyncIterator[StreamEvent]:
-    """Process a stream chunk and yield StreamEvent objects."""
+    """Process a stream chunk and yield StreamEvent objects.
+
+    Checks event filter BEFORE creating events to avoid unnecessary allocations.
+    """
     mode, data = chunk
 
     if mode == "messages":
+        # Check filter before creating token event
+        if not _should_emit(EventType.TOKEN, event_filter):
+            return
         msg_chunk, metadata = data
         if content := getattr(msg_chunk, "content", ""):
-            event = factory.token(
+            yield factory.token(
                 content=content,
                 agent_id=metadata.get("langgraph_node"),
             )
-            if _should_emit(event.type, event_filter):
-                yield event
 
     elif mode == "updates" and isinstance(data, dict):
         for node_name, node_data in data.items():
@@ -255,10 +267,16 @@ async def _process_stream_chunk(
                     yield event
 
     elif mode == "custom" and isinstance(data, dict):
-        # Workflows emit StreamEvent.to_dict(), reconstruct directly
+        # Workflows emit StreamEvent.to_dict(), reconstruct with monotonic timestamp
         try:
-            event = StreamEvent.from_dict(data)
-            if _should_emit(event.type, event_filter):
+            event_type = EventType(data.get("type", ""))
+            # Check filter before reconstructing event
+            if _should_emit(event_type, event_filter):
+                # Reconstruct event but use factory's monotonic timestamp
+                # to ensure all events have strictly increasing timestamps
+                event = StreamEvent.from_dict(data)
+                # Override timestamp with monotonic timestamp from main factory
+                object.__setattr__(event, 'timestamp', factory._get_monotonic_timestamp())
                 yield event
         except (KeyError, ValueError):
             pass  # Ignore malformed events
@@ -270,10 +288,14 @@ async def _process_node_update(
     factory: EventFactory,
     event_filter: set[EventType] | None,
 ) -> AsyncIterator[StreamEvent]:
-    """Process a node update and yield appropriate StreamEvent objects."""
+    """Process a node update and yield appropriate StreamEvent objects.
+
+    Checks event filter BEFORE creating events to avoid unnecessary allocations.
+    """
     if node_name == "analyze_and_plan":
         # Planning start (when workflow not yet determined)
         if "workflow" not in node_data and "complexity" not in node_data:
+            # Check filter before creating planning_start event
             if _should_emit(EventType.PLANNING_START, event_filter):
                 agents_info = [
                     {"name": getattr(a, "name", f"agent_{i}")}
@@ -286,11 +308,13 @@ async def _process_node_update(
 
         # Planning complete (when workflow is determined)
         if workflow := node_data.get("workflow"):
+            # Check filter before creating phase_change event
             if _should_emit(EventType.PHASE_CHANGE, event_filter):
                 yield factory.phase_change(
                     EventPhase.ANALYZING, EventPhase.EXECUTING, 30, "Planning complete"
                 )
 
+            # Check filter before creating planning_complete event
             if _should_emit(EventType.PLANNING_COMPLETE, event_filter):
                 yield factory.planning_complete(
                     complexity=node_data.get("complexity", ""),
@@ -301,6 +325,7 @@ async def _process_node_update(
                     total_instances=node_data.get("total_instances", 0),
                 )
 
+            # Check filter before creating workflow_selected event
             if _should_emit(EventType.WORKFLOW_SELECTED, event_filter):
                 yield factory.workflow_selected(
                     workflow=workflow,
@@ -316,6 +341,7 @@ async def _process_node_update(
 
         if final_result is not None:
             is_executing = factory.current_phase == EventPhase.EXECUTING
+            # Check filter before creating phase_change event
             if is_executing and _should_emit(EventType.PHASE_CHANGE, event_filter):
                 yield factory.phase_change(
                     EventPhase.EXECUTING, EventPhase.SYNTHESIZING, 75, "Synthesizing"
@@ -324,11 +350,13 @@ async def _process_node_update(
             success_count = partial_info.get("success_count", 0)
             failure_count = partial_info.get("failure_count", 0)
 
+            # Check filter before creating synthesis_start event
             if _should_emit(EventType.SYNTHESIS_START, event_filter):
                 yield factory.synthesis_start(
                     success_count + failure_count, success_count, failure_count
                 )
 
+            # Check filter before creating synthesis_complete event
             if _should_emit(EventType.SYNTHESIS_COMPLETE, event_filter):
                 citations = node_data.get("citations") or _extract_citations(
                     final_result or ""
@@ -340,6 +368,7 @@ async def _process_node_update(
                     duration_ms=0,
                 )
 
+            # Check filter before creating phase_change event
             if _should_emit(EventType.PHASE_CHANGE, event_filter):
                 yield factory.phase_change(
                     EventPhase.SYNTHESIZING, EventPhase.COMPLETE, 100, "Complete"

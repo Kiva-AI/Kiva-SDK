@@ -77,7 +77,7 @@ class EventSeverity(str, Enum):
     ERROR = "error"
 
 
-@dataclass
+@dataclass(slots=True)
 class StreamEvent:
     """Streaming event emitted during orchestration execution."""
 
@@ -109,8 +109,30 @@ class StreamEvent:
         }
 
     def to_json(self) -> str:
-        """Convert event to JSON string."""
-        return json.dumps(self.to_dict(), ensure_ascii=False)
+        """Convert event to JSON string.
+
+        Non-serializable objects are converted to their string representation.
+        """
+        return json.dumps(self.to_dict(), ensure_ascii=False, default=str)
+
+    def to_sse(self) -> str:
+        """Convert event to SSE (Server-Sent Events) format string.
+
+        Returns:
+            SSE formatted string with event, id, and data fields,
+            ending with double newline.
+        """
+        # JSON already escapes newlines properly, so no additional escaping needed
+        json_data = self.to_json()
+        return f"event: {self.type.value}\nid: {self.event_id}\ndata: {json_data}\n\n"
+
+    def to_ndjson(self) -> str:
+        """Convert event to NDJSON (Newline Delimited JSON) format.
+
+        Returns:
+            Single-line JSON string followed by newline character.
+        """
+        return self.to_json() + "\n"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "StreamEvent":
@@ -135,16 +157,40 @@ class StreamEvent:
 
 
 class EventFactory:
-    """Factory for creating StreamEvent instances with execution context."""
+    """Factory for creating StreamEvent instances with execution context.
+
+    Maintains monotonic timestamp guarantee for event ordering.
+    """
+
+    __slots__ = ('execution_id', 'current_phase', 'start_time', '_last_timestamp')
 
     def __init__(self, execution_id: str) -> None:
         self.execution_id = execution_id
         self.current_phase = EventPhase.INITIALIZING
         self.start_time = time.time()
+        self._last_timestamp = self.start_time
 
     def set_phase(self, phase: EventPhase) -> None:
         """Set the current execution phase."""
         self.current_phase = phase
+
+    def _get_monotonic_timestamp(self) -> float:
+        """Get a monotonically increasing timestamp.
+
+        Ensures timestamps are strictly monotonically increasing even if
+        the system clock returns the same or earlier time.
+
+        Returns:
+            A timestamp guaranteed to be greater than the previous timestamp.
+        """
+        now = time.time()
+        if now <= self._last_timestamp:
+            # Ensure monotonic by adding small increment (1 microsecond)
+            # Using 1e-6 instead of 1e-9 to ensure float precision at typical timestamp magnitudes
+            self._last_timestamp += 1e-6
+        else:
+            self._last_timestamp = now
+        return self._last_timestamp
 
     def create(
         self,
@@ -156,7 +202,10 @@ class EventFactory:
         instance_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> StreamEvent:
-        """Create a new StreamEvent with the current execution context."""
+        """Create a new StreamEvent with the current execution context.
+
+        Uses monotonic timestamps to ensure event ordering.
+        """
         return StreamEvent(
             type=event_type,
             phase=self.current_phase,
@@ -166,6 +215,7 @@ class EventFactory:
             metadata=metadata or {},
             agent_id=agent_id,
             instance_id=instance_id,
+            timestamp=self._get_monotonic_timestamp(),
         )
 
     # Lifecycle

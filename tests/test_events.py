@@ -1251,6 +1251,80 @@ class TestEventFiltering:
         for event_type in EventType:
             assert _should_emit(event_type, full_filter) is True
 
+    # =========================================================================
+    # Property 4: Event Filtering Correctness (streaming-api-optimization)
+    # =========================================================================
+
+    @given(st.sets(st.sampled_from(list(EventType)), min_size=1, max_size=len(EventType)))
+    @settings(max_examples=100)
+    def test_event_filtering_only_yields_filtered_types(
+        self, filter_set: set[EventType]
+    ):
+        """Property 4: Event Filtering Correctness.
+
+        For any event filter set, the _should_emit function SHALL return True
+        only for event types present in the filter set, ensuring that yielded
+        events only contain event types present in the filter.
+
+        Feature: streaming-api-optimization, Property 4: Event Filtering Correctness
+        **Validates: Requirements 5.2, 5.3**
+        """
+        from kiva.run import _should_emit
+
+        # For all event types, check that _should_emit correctly filters
+        for event_type in EventType:
+            result = _should_emit(event_type, filter_set)
+            expected = event_type in filter_set
+            assert result == expected, (
+                f"Event type {event_type} should {'be' if expected else 'not be'} "
+                f"emitted with filter {filter_set}"
+            )
+
+    @given(st.sets(st.sampled_from(list(EventType)), min_size=0, max_size=len(EventType)))
+    @settings(max_examples=100)
+    def test_event_filtering_no_false_positives(
+        self, filter_set: set[EventType]
+    ):
+        """Property 4: Event Filtering - No False Positives.
+
+        For any event filter set, _should_emit SHALL never return True for
+        event types that are NOT in the filter set.
+
+        Feature: streaming-api-optimization, Property 4: Event Filtering Correctness
+        **Validates: Requirements 5.2, 5.3**
+        """
+        from kiva.run import _should_emit
+
+        all_types = set(EventType)
+        excluded_types = all_types - filter_set
+
+        # Verify no false positives - excluded types should never be emitted
+        for event_type in excluded_types:
+            assert _should_emit(event_type, filter_set) is False, (
+                f"Event type {event_type} should NOT be emitted when not in filter"
+            )
+
+    @given(st.sets(st.sampled_from(list(EventType)), min_size=1, max_size=len(EventType)))
+    @settings(max_examples=100)
+    def test_event_filtering_no_false_negatives(
+        self, filter_set: set[EventType]
+    ):
+        """Property 4: Event Filtering - No False Negatives.
+
+        For any event filter set, _should_emit SHALL always return True for
+        event types that ARE in the filter set.
+
+        Feature: streaming-api-optimization, Property 4: Event Filtering Correctness
+        **Validates: Requirements 5.2, 5.3**
+        """
+        from kiva.run import _should_emit
+
+        # Verify no false negatives - included types should always be emitted
+        for event_type in filter_set:
+            assert _should_emit(event_type, filter_set) is True, (
+                f"Event type {event_type} SHOULD be emitted when in filter"
+            )
+
 
 class TestWorkflowEventLifecycle:
     """Property-based tests for workflow event lifecycle properties.
@@ -2510,3 +2584,335 @@ class TestPlanningAndSynthesisProperties:
         # But different types
         assert planning_event.type == EventType.PLANNING_PROGRESS
         assert synthesis_event.type == EventType.SYNTHESIS_PROGRESS
+
+
+class TestStreamEventSerializationProperties:
+    """Property-based tests for StreamEvent serialization methods.
+
+    Feature: streaming-api-optimization
+    Properties 1, 2, 3, 6
+    Validates: Requirements 2.1, 2.2, 2.3, 3.1, 3.2, 3.3
+    """
+
+    @given(stream_event_strategy())
+    @settings(max_examples=100)
+    def test_sse_format_validity(self, event: StreamEvent):
+        """Property 1: SSE Format Validity.
+
+        For any StreamEvent, calling to_sse() SHALL return a string that:
+        - Contains `event: {type.value}` line
+        - Contains `id: {event_id}` line
+        - Contains `data: {valid_json}` line
+        - Ends with double newline
+        - Has no unescaped newlines within the data JSON
+
+        Feature: streaming-api-optimization, Property 1: SSE Format Validity
+        Validates: Requirements 2.1, 2.2, 2.3
+        """
+        import json
+
+        sse_output = event.to_sse()
+
+        # Must end with double newline
+        assert sse_output.endswith("\n\n"), "SSE output must end with double newline"
+
+        # Parse the SSE format
+        lines = sse_output.rstrip("\n").split("\n")
+        assert len(lines) == 3, f"SSE output must have exactly 3 lines, got {len(lines)}"
+
+        # Check event line
+        assert lines[0].startswith("event: "), "First line must start with 'event: '"
+        assert lines[0] == f"event: {event.type.value}"
+
+        # Check id line
+        assert lines[1].startswith("id: "), "Second line must start with 'id: '"
+        assert lines[1] == f"id: {event.event_id}"
+
+        # Check data line
+        assert lines[2].startswith("data: "), "Third line must start with 'data: '"
+        data_json = lines[2][6:]  # Remove "data: " prefix
+
+        # The data JSON should be valid JSON (json.dumps already escapes newlines)
+        parsed = json.loads(data_json)
+        assert isinstance(parsed, dict)
+        assert parsed["type"] == event.type.value
+        assert parsed["event_id"] == event.event_id
+
+    @given(stream_event_strategy())
+    @settings(max_examples=100)
+    def test_ndjson_format_validity(self, event: StreamEvent):
+        """Property 3: NDJSON Format Validity.
+
+        For any StreamEvent, calling to_ndjson() SHALL return a string that:
+        - Is valid JSON (parseable by json.loads())
+        - Contains exactly one newline at the end
+        - Contains no other newlines
+
+        Feature: streaming-api-optimization, Property 3: NDJSON Format Validity
+        Validates: Requirements 3.1
+        """
+        import json
+
+        ndjson_output = event.to_ndjson()
+
+        # Must end with exactly one newline
+        assert ndjson_output.endswith("\n"), "NDJSON output must end with newline"
+
+        # Remove trailing newline and check no other newlines
+        json_part = ndjson_output[:-1]
+        assert "\n" not in json_part, "NDJSON must not contain newlines except at end"
+
+        # Must be valid JSON
+        parsed = json.loads(json_part)
+        assert isinstance(parsed, dict)
+        assert parsed["type"] == event.type.value
+        assert parsed["event_id"] == event.event_id
+
+    @given(stream_event_strategy())
+    @settings(max_examples=100)
+    def test_json_serialization_round_trip_with_new_methods(self, event: StreamEvent):
+        """Property 2: JSON Serialization Round-Trip.
+
+        For any StreamEvent, calling to_json() then from_json() SHALL produce
+        an equivalent StreamEvent with same type, event_id, data, and execution_id.
+
+        Feature: streaming-api-optimization, Property 2: JSON Serialization Round-Trip
+        Validates: Requirements 3.1, 3.2, 3.3
+        """
+        json_str = event.to_json()
+        deserialized = StreamEvent.from_json(json_str)
+
+        assert deserialized.type == event.type
+        assert deserialized.event_id == event.event_id
+        assert deserialized.data == event.data
+        assert deserialized.execution_id == event.execution_id
+
+    def test_non_serializable_object_handling(self):
+        """Property 6: Non-Serializable Object Handling.
+
+        For any StreamEvent with non-JSON-serializable objects in data,
+        calling to_json() SHALL not raise an exception and SHALL convert
+        non-serializable objects to their string representation.
+
+        Feature: streaming-api-optimization, Property 6: Non-Serializable Object Handling
+        Validates: Requirements 3.3
+        """
+        import json
+        from datetime import datetime
+
+        # Create a custom non-serializable object
+        class CustomObject:
+            def __str__(self):
+                return "CustomObject()"
+
+        # Create event with non-serializable data
+        event = StreamEvent(
+            type=EventType.DEBUG,
+            data={
+                "custom_obj": CustomObject(),
+                "datetime_obj": datetime.now(),
+                "set_obj": {1, 2, 3},  # Sets are not JSON serializable
+                "normal_str": "hello",
+                "normal_int": 42,
+            },
+            execution_id="exec-123",
+        )
+
+        # Should not raise an exception
+        json_str = event.to_json()
+
+        # Should be valid JSON
+        parsed = json.loads(json_str)
+        assert isinstance(parsed, dict)
+
+        # Non-serializable objects should be converted to strings
+        assert parsed["data"]["custom_obj"] == "CustomObject()"
+        assert isinstance(parsed["data"]["datetime_obj"], str)
+        assert isinstance(parsed["data"]["set_obj"], str)
+
+        # Normal serializable objects should remain unchanged
+        assert parsed["data"]["normal_str"] == "hello"
+        assert parsed["data"]["normal_int"] == 42
+
+    def test_sse_escapes_newlines_in_data(self):
+        """Test that SSE format properly handles newlines in JSON data.
+
+        Feature: streaming-api-optimization, Property 1: SSE Format Validity
+        Validates: Requirements 2.3
+        """
+        import json
+
+        # Create event with newlines in data
+        event = StreamEvent(
+            type=EventType.DEBUG,
+            data={
+                "message": "Line 1\nLine 2\nLine 3",
+                "multiline": "First\nSecond",
+            },
+            execution_id="exec-123",
+        )
+
+        sse_output = event.to_sse()
+
+        # The SSE output should have exactly 3 lines (event, id, data) plus 2 empty lines
+        lines = sse_output.split("\n")
+        # Should be: event, id, data, empty, empty
+        assert len(lines) == 5, f"Expected 5 lines, got {len(lines)}: {lines}"
+
+        # The data line should be valid JSON (json.dumps escapes newlines as \n)
+        data_line = lines[2]
+        assert data_line.startswith("data: ")
+        data_json = data_line[6:]
+
+        # Should be valid JSON that can be parsed directly
+        parsed = json.loads(data_json)
+        assert parsed["data"]["message"] == "Line 1\nLine 2\nLine 3"
+        assert parsed["data"]["multiline"] == "First\nSecond"
+
+    def test_ndjson_with_special_characters(self):
+        """Test NDJSON format with special characters in data.
+
+        Feature: streaming-api-optimization, Property 3: NDJSON Format Validity
+        Validates: Requirements 3.1
+        """
+        import json
+
+        event = StreamEvent(
+            type=EventType.DEBUG,
+            data={
+                "unicode": "Hello 世界 🌍",
+                "quotes": 'He said "hello"',
+                "backslash": "path\\to\\file",
+            },
+            execution_id="exec-123",
+        )
+
+        ndjson_output = event.to_ndjson()
+
+        # Should end with single newline
+        assert ndjson_output.endswith("\n")
+        assert ndjson_output.count("\n") == 1
+
+        # Should be valid JSON
+        parsed = json.loads(ndjson_output.strip())
+        assert parsed["data"]["unicode"] == "Hello 世界 🌍"
+        assert parsed["data"]["quotes"] == 'He said "hello"'
+        assert parsed["data"]["backslash"] == "path\\to\\file"
+
+
+class TestMonotonicTimestamps:
+    """Property-based tests for EventFactory monotonic timestamps.
+
+    Feature: streaming-api-optimization, Property 5: Monotonic Timestamps
+    Validates: Requirements 7.1, 7.2, 7.3, 7.4
+    """
+
+    @given(st.integers(min_value=2, max_value=100))
+    @settings(max_examples=100)
+    def test_timestamps_are_strictly_monotonically_increasing(self, num_events: int):
+        """Property 5: Monotonic Timestamps.
+
+        For any sequence of events created by the same EventFactory,
+        the timestamps SHALL be strictly monotonically increasing:
+        event[i].timestamp < event[i+1].timestamp for all i.
+
+        Feature: streaming-api-optimization, Property 5: Monotonic Timestamps
+        Validates: Requirements 7.1, 7.2, 7.3, 7.4
+        """
+        from kiva.events import EventFactory
+
+        factory = EventFactory("exec-test")
+        events = []
+
+        for i in range(num_events):
+            event = factory.create(
+                EventType.DEBUG,
+                {"index": i},
+            )
+            events.append(event)
+
+        # Verify strict monotonic increase
+        for i in range(1, len(events)):
+            assert events[i].timestamp > events[i - 1].timestamp, (
+                f"Timestamp not strictly increasing at index {i}: "
+                f"{events[i - 1].timestamp} >= {events[i].timestamp}"
+            )
+
+    def test_monotonic_timestamp_handles_clock_regression(self):
+        """Test that monotonic timestamps handle system clock regression.
+
+        Feature: streaming-api-optimization, Property 5: Monotonic Timestamps
+        Validates: Requirements 7.2, 7.3
+        """
+        from unittest.mock import patch
+        from kiva.events import EventFactory
+
+        factory = EventFactory("exec-test")
+
+        # Create first event
+        event1 = factory.create(EventType.DEBUG, {"index": 1})
+
+        # Simulate clock going backwards by patching time.time
+        with patch('kiva.events.time.time', return_value=event1.timestamp - 1.0):
+            event2 = factory.create(EventType.DEBUG, {"index": 2})
+
+        # Second event should still have a larger timestamp
+        assert event2.timestamp > event1.timestamp, (
+            f"Timestamp should increase even with clock regression: "
+            f"{event1.timestamp} >= {event2.timestamp}"
+        )
+
+    def test_monotonic_timestamp_handles_same_time(self):
+        """Test that monotonic timestamps handle same time.time() values.
+
+        Feature: streaming-api-optimization, Property 5: Monotonic Timestamps
+        Validates: Requirements 7.2, 7.3
+        """
+        from unittest.mock import patch
+        from kiva.events import EventFactory
+
+        fixed_time = 1000000.0
+        factory = EventFactory("exec-test")
+
+        # Patch time.time to return the same value
+        with patch('kiva.events.time.time', return_value=fixed_time):
+            # Override start_time and _last_timestamp to use fixed time
+            factory._last_timestamp = fixed_time
+
+            events = []
+            for i in range(5):
+                event = factory.create(EventType.DEBUG, {"index": i})
+                events.append(event)
+
+        # All timestamps should be strictly increasing
+        for i in range(1, len(events)):
+            assert events[i].timestamp > events[i - 1].timestamp, (
+                f"Timestamp not strictly increasing at index {i}: "
+                f"{events[i - 1].timestamp} >= {events[i].timestamp}"
+            )
+
+    def test_event_factory_has_slots(self):
+        """Test that EventFactory uses __slots__ for memory optimization.
+
+        Feature: streaming-api-optimization
+        Validates: Requirements 4.1
+        """
+        from kiva.events import EventFactory
+
+        factory = EventFactory("exec-test")
+
+        # Verify __slots__ is defined
+        assert hasattr(EventFactory, '__slots__')
+        assert 'execution_id' in EventFactory.__slots__
+        assert 'current_phase' in EventFactory.__slots__
+        assert 'start_time' in EventFactory.__slots__
+        assert '_last_timestamp' in EventFactory.__slots__
+
+        # Verify we cannot add arbitrary attributes (slots restriction)
+        try:
+            factory.arbitrary_attribute = "test"
+            has_dict = True
+        except AttributeError:
+            has_dict = False
+
+        assert not has_dict, "EventFactory should not allow arbitrary attributes with __slots__"

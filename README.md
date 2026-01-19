@@ -74,6 +74,40 @@ async for event in kiva.stream("Your prompt here"):
         print(f"Agent {event.data['agent_id']} finished")
 ```
 
+### Streaming Output Formats
+
+StreamEvent supports multiple output formats for different use cases:
+
+```python
+async for event in kiva.stream("Your prompt"):
+    # SSE format for web frontends
+    sse_string = event.to_sse()
+    # Output: "event: agent_end\nid: {uuid}\ndata: {json}\n\n"
+    
+    # NDJSON format for CLI tools and logging
+    ndjson_string = event.to_ndjson()
+    # Output: "{json}\n"
+    
+    # JSON string
+    json_string = event.to_json()
+    
+    # Dictionary
+    event_dict = event.to_dict()
+```
+
+### Event Filtering
+
+Filter events at the source to reduce overhead:
+
+```python
+from kiva.events import EventType
+
+# Only receive specific event types
+event_filter = {EventType.AGENT_START, EventType.AGENT_END}
+async for event in kiva.stream("Your prompt", event_filter=event_filter):
+    print(event.type.value)
+```
+
 ## Modular Application with AgentRouter
 
 ```python
@@ -97,7 +131,23 @@ await kiva.run("What's the weather?")
 
 - [AgentRouter - Modular Applications](docs/agent-router.md)
 - [Parallel Agent Instances](docs/parallel-instances.md)
+- [SSE Integration Guide](docs/sse-integration.md)
+- [NDJSON Streaming Guide](docs/ndjson-streaming.md)
+- [Execution Outputs](docs/execution-outputs.md)
 - [E2E Testing Guide](docs/e2e-testing-guide.md)
+
+## Event Types Reference
+
+| Event Type | Description |
+|------------|-------------|
+| `execution_start` | Execution begins |
+| `agent_start` | Agent starts processing |
+| `agent_end` | Agent completes with result |
+| `token` | Streaming token from LLM |
+| `execution_end` | Execution completes |
+| `execution_error` | Error occurred |
+
+See [Execution Outputs](docs/execution-outputs.md) for complete event documentation.
 
 ## License
 
