@@ -17,8 +17,10 @@ from typing import Any
 from kiva.state import OrchestratorState
 from kiva.workflows.executor import execute_instances_batch
 from kiva.workflows.utils import (
-    emit_event,
+    create_workflow_factory,
+    emit_stream_event,
     execute_single_agent,
+    generate_batch_id,
     generate_invocation_id,
     get_agent_by_id,
     make_error_result,
@@ -95,6 +97,10 @@ async def _execute_with_instances(
     Expands task assignments into individual instances and executes them
     in parallel batches.
     """
+    factory = create_workflow_factory(execution_id)
+    batch_id = generate_batch_id(execution_id)
+    batch_start_time = time.time()
+
     # Expand assignments into instances
     instances = []
     for assignment in task_assignments:
@@ -118,15 +124,17 @@ async def _execute_with_instances(
         if len(instances) >= max_parallel:
             break
 
-    # Emit parallel start event
-    emit_event(
-        {
-            "type": "parallel_instances_start",
-            "instance_count": len(instances),
-            "agent_ids": list({inst["agent_id"] for inst in instances}),
-            "execution_id": execution_id,
-            "timestamp": time.time(),
-        }
+    # Get unique agent IDs
+    agent_ids = list({inst["agent_id"] for inst in instances})
+
+    # Emit parallel_start event using new format
+    emit_stream_event(
+        factory.parallel_start(
+            batch_id=batch_id,
+            agent_ids=agent_ids,
+            instance_count=len(instances),
+            strategy=state.get("parallel_strategy", "fan_out"),
+        )
     )
 
     # Execute all instances
@@ -135,7 +143,16 @@ async def _execute_with_instances(
     # Convert instance results to agent_results format
     agent_results = []
     instance_contexts = []
+    success_count = 0
+    failure_count = 0
+
     for result in results:
+        has_error = result.get("error") is not None
+        if has_error:
+            failure_count += 1
+        else:
+            success_count += 1
+
         agent_results.append(
             {
                 "agent_id": result.get("agent_id"),
@@ -150,10 +167,13 @@ async def _execute_with_instances(
         if ctx := result.get("context"):
             instance_contexts.append(ctx)
 
-    emit_event(
-        {
-            "type": "parallel_instances_complete",
-            "results": [
+    batch_duration_ms = int((time.time() - batch_start_time) * 1000)
+
+    # Emit parallel_complete event using new format
+    emit_stream_event(
+        factory.parallel_complete(
+            batch_id=batch_id,
+            results=[
                 {
                     "agent_id": r.get("agent_id"),
                     "instance_id": r.get("instance_id"),
@@ -161,9 +181,10 @@ async def _execute_with_instances(
                 }
                 for r in agent_results
             ],
-            "execution_id": execution_id,
-            "timestamp": time.time(),
-        }
+            success_count=success_count,
+            failure_count=failure_count,
+            duration_ms=batch_duration_ms,
+        )
     )
 
     return {
@@ -182,16 +203,22 @@ async def _execute_single_agents(
     """Execute single-instance agents (original behavior)."""
     import asyncio
 
+    factory = create_workflow_factory(execution_id)
+    batch_id = generate_batch_id(execution_id)
+    batch_start_time = time.time()
+
     agent_ids = [
         a.get("agent_id", f"agent_{i}") for i, a in enumerate(task_assignments)
     ]
-    emit_event(
-        {
-            "type": "parallel_start",
-            "agent_ids": agent_ids,
-            "execution_id": execution_id,
-            "timestamp": time.time(),
-        }
+
+    # Emit parallel_start event using new format
+    emit_stream_event(
+        factory.parallel_start(
+            batch_id=batch_id,
+            agent_ids=agent_ids,
+            instance_count=len(agent_ids),
+            strategy=state.get("parallel_strategy", "none"),
+        )
     )
 
     tasks = []
@@ -209,6 +236,9 @@ async def _execute_single_agents(
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     agent_results = []
+    success_count = 0
+    failure_count = 0
+
     for i, result in enumerate(results):
         if isinstance(result, Exception):
             agent_id = (
@@ -225,19 +255,28 @@ async def _execute_single_agents(
                     "error": str(result),
                 }
             )
+            failure_count += 1
         else:
             agent_results.append(result)
+            if result.get("error") is None:
+                success_count += 1
+            else:
+                failure_count += 1
 
-    emit_event(
-        {
-            "type": "parallel_complete",
-            "results": [
+    batch_duration_ms = int((time.time() - batch_start_time) * 1000)
+
+    # Emit parallel_complete event using new format
+    emit_stream_event(
+        factory.parallel_complete(
+            batch_id=batch_id,
+            results=[
                 {"agent_id": r.get("agent_id"), "success": r.get("error") is None}
                 for r in agent_results
             ],
-            "execution_id": execution_id,
-            "timestamp": time.time(),
-        }
+            success_count=success_count,
+            failure_count=failure_count,
+            duration_ms=batch_duration_ms,
+        )
     )
 
     return {"agent_results": agent_results}

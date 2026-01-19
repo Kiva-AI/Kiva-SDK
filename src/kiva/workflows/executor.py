@@ -11,7 +11,8 @@ from langchain_core.runnables import RunnableConfig
 
 from kiva.state import AgentInstanceState
 from kiva.workflows.utils import (
-    emit_event,
+    create_workflow_factory,
+    emit_stream_event,
     execute_agent_instance,
     get_agent_by_id,
 )
@@ -47,19 +48,31 @@ async def execute_instance_node(
     if config and "configurable" in config:
         agents = config["configurable"].get("agents", [])
 
-    emit_event(
-        {
-            "type": "instance_spawn",
-            "instance_id": instance_id,
-            "agent_id": agent_id,
-            "execution_id": execution_id,
-            "task": task,
-            "timestamp": time.time(),
-        }
+    factory = create_workflow_factory(execution_id)
+    instance_num = context.get("instance_num", 0)
+
+    # Emit instance_spawn event using new format
+    emit_stream_event(
+        factory.instance_spawn(
+            instance_id=instance_id,
+            agent_id=agent_id,
+            task=task,
+            instance_num=instance_num,
+            context=context,
+        )
     )
 
     agent = get_agent_by_id(agents, agent_id)
     if agent is None:
+        # Emit instance_error for missing agent
+        emit_stream_event(
+            factory.instance_error(
+                instance_id=instance_id,
+                agent_id=agent_id,
+                error_type="AgentNotFoundError",
+                error_message=f"Agent '{agent_id}' not found",
+            )
+        )
         error_result = {
             "instance_id": instance_id,
             "agent_id": agent_id,
@@ -72,6 +85,7 @@ async def execute_instance_node(
             "instance_contexts": [context],
         }
 
+    start_time = time.time()
     result = await execute_agent_instance(
         agent=agent,
         instance_id=instance_id,
@@ -83,16 +97,21 @@ async def execute_instance_node(
         max_retries=max_retries,
     )
 
-    emit_event(
-        {
-            "type": "instance_complete",
-            "instance_id": instance_id,
-            "agent_id": agent_id,
-            "execution_id": execution_id,
-            "success": result.get("error") is None,
-            "timestamp": time.time(),
-        }
-    )
+    duration_ms = int((time.time() - start_time) * 1000)
+    success = result.get("error") is None
+
+    # Emit instance completion event (instance_end is already emitted in
+    # execute_agent_instance, but we emit a summary event here)
+    if success:
+        emit_stream_event(
+            factory.instance_end(
+                instance_id=instance_id,
+                agent_id=agent_id,
+                result=result.get("result", "")[:500] if result.get("result") else "",
+                duration_ms=duration_ms,
+                success=True,
+            )
+        )
 
     return {
         "agent_results": [result],
@@ -125,7 +144,9 @@ async def execute_instances_batch(
         generate_instance_id,
     )
 
+    factory = create_workflow_factory(execution_id)
     tasks = []
+
     for i, inst in enumerate(instances):
         agent_id = inst.get("agent_id", f"agent_{i}")
         task = inst.get("task", "")
@@ -134,10 +155,34 @@ async def execute_instances_batch(
         instance_id = generate_instance_id(execution_id, agent_id, i)
         context = create_instance_context(instance_id, agent_id, task, base_context)
 
+        # Emit instance_spawn event
+        emit_stream_event(
+            factory.instance_spawn(
+                instance_id=instance_id,
+                agent_id=agent_id,
+                task=task,
+                instance_num=i,
+                context=context,
+            )
+        )
+
         agent = get_agent_by_id(agents, agent_id)
         if agent is None:
             # Create error result for missing agent
-            async def make_error(aid=agent_id, iid=instance_id, ctx=context):
+            async def make_error(
+                aid: str = agent_id,
+                iid: str = instance_id,
+                ctx: dict = context,
+            ) -> dict[str, Any]:
+                # Emit instance_error event
+                emit_stream_event(
+                    factory.instance_error(
+                        instance_id=iid,
+                        agent_id=aid,
+                        error_type="AgentNotFoundError",
+                        error_message=f"Agent '{aid}' not found",
+                    )
+                )
                 return {
                     "instance_id": iid,
                     "agent_id": aid,
@@ -165,9 +210,21 @@ async def execute_instances_batch(
     for i, result in enumerate(results):
         if isinstance(result, Exception):
             agent_id = instances[i].get("agent_id", f"agent_{i}")
+            instance_id = f"error-{i}"
+
+            # Emit instance_error event for exception
+            emit_stream_event(
+                factory.instance_error(
+                    instance_id=instance_id,
+                    agent_id=agent_id,
+                    error_type=type(result).__name__,
+                    error_message=str(result),
+                )
+            )
+
             processed_results.append(
                 {
-                    "instance_id": f"error-{i}",
+                    "instance_id": instance_id,
                     "agent_id": agent_id,
                     "result": None,
                     "error": str(result),

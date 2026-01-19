@@ -6,18 +6,39 @@ real-time monitoring of execution progress, including instance-level events.
 
 Example:
     >>> async for event in run(prompt="...", agents=[...]):
-    ...     if event.type == "final_result":
+    ...     if event.type == EventType.EXECUTION_END:
     ...         print(event.data["result"])
 """
 
-import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
-from kiva.events import StreamEvent
+from kiva.events import (
+    EventFactory,
+    EventPhase,
+    EventType,
+    StreamEvent,
+)
 from kiva.exceptions import ConfigurationError
 from kiva.graph import build_orchestrator_graph
+
+
+def _should_emit(event_type: EventType, filter_set: set[EventType] | None) -> bool:
+    """Check if event should be emitted based on filter.
+
+    This function is designed to be called BEFORE event creation to avoid
+    unnecessary object allocations when events will be filtered out.
+
+    Args:
+        event_type: The type of event to check.
+        filter_set: Optional set of event types to emit. If None, all events
+            are emitted.
+
+    Returns:
+        True if the event should be emitted, False otherwise.
+    """
+    return filter_set is None or event_type in filter_set
 
 
 async def run(
@@ -32,6 +53,7 @@ async def run(
     worker_max_iterations: int = 100,
     max_retries: int = 3,
     max_parallel_agents: int = 5,
+    event_filter: set[EventType] | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """Run multi-agent orchestration and yield streaming events.
 
@@ -51,21 +73,29 @@ async def run(
         worker_max_iterations: Maximum iterations for worker agents. Defaults to 100.
         max_retries: Maximum retry attempts for failed worker agents. Defaults to 3.
         max_parallel_agents: Maximum concurrent agent executions. Defaults to 5.
+        event_filter: Optional set of EventType values to filter which events are
+            emitted. If None, all events are emitted. Use this to subscribe to
+            specific event types only.
 
     Yields:
         StreamEvent objects representing execution progress, including:
-        - workflow_selected: Planning complete, workflow chosen
-        - instance_spawn: New agent instance spawned
-        - instance_complete: Agent instance finished
-        - parallel_instances_start/complete: Batch instance events
-        - agent_start/end: Individual agent events
-        - final_result: Synthesized result
+        - execution_start/end/error: Lifecycle events
+        - phase_change: Phase transition events
+        - planning_start/progress/complete: Planning events
+        - workflow_selected/start/end: Workflow events
+        - agent_start/progress/end/error/retry: Agent events
+        - instance_spawn/start/progress/end/error/retry: Instance events
+        - parallel_start/progress/complete: Parallel execution events
+        - synthesis_start/progress/complete: Synthesis events
+        - token: Streaming token events
+        - tool_call_start/end: Tool call events
 
     Raises:
         ConfigurationError: If agents list is empty or agents lack ainvoke method.
 
     Example:
         >>> from kiva import run, create_agent, ChatOpenAI, tool
+        >>> from kiva.events import EventType
         >>>
         >>> @tool
         ... def search(query: str) -> str:
@@ -77,7 +107,13 @@ async def run(
         >>> agent.name = "searcher"
         >>> agent.description = "Searches for information"
         >>>
+        >>> # Get all events
         >>> async for event in run("Search for Python", agents=[agent]):
+        ...     print(event.type)
+        >>>
+        >>> # Filter to specific event types
+        >>> filter_set = {EventType.EXECUTION_START, EventType.EXECUTION_END}
+        >>> async for event in run("Search", agents=[agent], event_filter=filter_set):
         ...     print(event.type)
     """
     if not agents:
@@ -91,7 +127,30 @@ async def run(
             )
 
     execution_id = str(uuid.uuid4())
+    factory = EventFactory(execution_id)
     graph = build_orchestrator_graph()
+
+    # Build execution config
+    config_data = {
+        "model_name": model_name,
+        "max_iterations": max_iterations,
+        "worker_max_iterations": worker_max_iterations,
+        "max_retries": max_retries,
+        "max_parallel_agents": max_parallel_agents,
+    }
+
+    # Emit execution_start event - check filter before creating
+    if _should_emit(EventType.EXECUTION_START, event_filter):
+        yield factory.execution_start(prompt, agents, config_data)
+
+    # Phase change: initializing -> analyzing - check filter before creating
+    if _should_emit(EventType.PHASE_CHANGE, event_filter):
+        yield factory.phase_change(
+            EventPhase.INITIALIZING,
+            EventPhase.ANALYZING,
+            10,
+            "Starting task analysis",
+        )
 
     initial_state = {
         "prompt": prompt,
@@ -121,34 +180,81 @@ async def run(
     # Pass agents via configurable for Send-based instance execution
     config = {"configurable": {"agents": agents}}
 
-    async for chunk in graph.astream(
-        initial_state, config=config, stream_mode=["messages", "updates", "custom"]
-    ):
-        async for event in _process_stream_chunk(chunk, execution_id):
-            yield event
+    final_result = None
+    agent_results_count = 0
+
+    try:
+        async for chunk in graph.astream(
+            initial_state, config=config, stream_mode=["messages", "updates", "custom"]
+        ):
+            async for event in _process_stream_chunk(chunk, factory, event_filter):
+                # Track final result for execution_end event
+                if event.type == EventType.SYNTHESIS_COMPLETE:
+                    final_result = event.data.get("result", "")
+                elif event.type == EventType.WORKFLOW_END:
+                    agent_results_count = event.data.get("results_count", 0)
+                yield event
+
+        # Emit execution_end event on success - check filter before creating
+        if _should_emit(EventType.EXECUTION_END, event_filter):
+            yield factory.execution_end(
+                result=final_result or "",
+                agent_results_count=agent_results_count,
+                success=True,
+            )
+
+    except Exception as e:
+        # Emit execution_error event - check filter before creating
+        if _should_emit(EventType.EXECUTION_ERROR, event_filter):
+            import traceback
+
+            yield factory.execution_error(
+                error_type=type(e).__name__,
+                error_message=str(e),
+                stack_trace=traceback.format_exc(),
+                recovery_suggestion=_get_recovery_suggestion(e),
+            )
+        raise
+
+
+def _get_recovery_suggestion(error: Exception) -> str | None:
+    """Get a recovery suggestion based on the error type.
+
+    Args:
+        error: The exception that occurred.
+
+    Returns:
+        A suggested recovery action, or None if no suggestion is available.
+    """
+    suggestions = {
+        "ConfigurationError": "Check agent configuration.",
+        "TimeoutError": "Increase timeout or reduce task complexity.",
+        "ConnectionError": "Check network connection and API endpoint.",
+        "AuthenticationError": "Verify API key and permissions.",
+        "RateLimitError": "Wait and retry, or reduce parallel agents.",
+    }
+    return suggestions.get(type(error).__name__)
 
 
 async def _process_stream_chunk(
-    chunk: tuple[str, Any], execution_id: str
+    chunk: tuple[str, Any],
+    factory: EventFactory,
+    event_filter: set[EventType] | None,
 ) -> AsyncIterator[StreamEvent]:
     """Process a stream chunk and yield StreamEvent objects.
 
-    Args:
-        chunk: Tuple of (mode, data) from the graph stream.
-        execution_id: Parent execution identifier for correlation.
-
-    Yields:
-        StreamEvent objects based on the chunk content.
+    Checks event filter BEFORE creating events to avoid unnecessary allocations.
     """
     mode, data = chunk
 
     if mode == "messages":
+        # Check filter before creating token event
+        if not _should_emit(EventType.TOKEN, event_filter):
+            return
         msg_chunk, metadata = data
         if content := getattr(msg_chunk, "content", ""):
-            yield StreamEvent(
-                type="token",
-                data={"content": content, "execution_id": execution_id},
-                timestamp=time.time(),
+            yield factory.token(
+                content=content,
                 agent_id=metadata.get("langgraph_node"),
             )
 
@@ -156,145 +262,123 @@ async def _process_stream_chunk(
         for node_name, node_data in data.items():
             if isinstance(node_data, dict):
                 async for event in _process_node_update(
-                    node_name, node_data, execution_id
+                    node_name, node_data, factory, event_filter
                 ):
                     yield event
 
     elif mode == "custom" and isinstance(data, dict):
-        event_type = data.get("type", "custom")
-
-        # Normalize agent_end events to match updates mode format
-        if event_type == "agent_end":
-            result_data = {
-                "agent_id": data.get("agent_id"),
-                "invocation_id": data.get("invocation_id"),
-                "result": data.get("result"),
-            }
-            event_data = {"result": result_data, "execution_id": execution_id}
-        elif event_type in (
-            "instance_spawn",
-            "instance_complete",
-            "instance_start",
-            "instance_end",
-        ):
-            # Instance-level events
-            event_data = {
-                "instance_id": data.get("instance_id"),
-                "agent_id": data.get("agent_id"),
-                "execution_id": execution_id,
-                "task": data.get("task"),
-                "result": data.get("result"),
-                "success": data.get("success"),
-            }
-        elif event_type in ("parallel_instances_start", "parallel_instances_complete"):
-            # Batch instance events
-            event_data = {
-                "instance_count": data.get("instance_count"),
-                "agent_ids": data.get("agent_ids"),
-                "results": data.get("results"),
-                "execution_id": execution_id,
-            }
-        else:
-            event_data = {**data, "execution_id": execution_id}
-
-        yield StreamEvent(
-            type=event_type,
-            data=event_data,
-            timestamp=data.get("timestamp", time.time()),
-            agent_id=data.get("agent_id"),
-        )
+        # Workflows emit StreamEvent.to_dict(), reconstruct with monotonic timestamp
+        try:
+            event_type = EventType(data.get("type", ""))
+            # Check filter before reconstructing event
+            if _should_emit(event_type, event_filter):
+                # Reconstruct event but use factory's monotonic timestamp
+                # to ensure all events have strictly increasing timestamps
+                event = StreamEvent.from_dict(data)
+                # Override timestamp with monotonic timestamp from main factory
+                object.__setattr__(
+                    event, "timestamp", factory._get_monotonic_timestamp()
+                )
+                yield event
+        except (KeyError, ValueError):
+            pass  # Ignore malformed events
 
 
 async def _process_node_update(
-    node_name: str, node_data: dict[str, Any], execution_id: str
+    node_name: str,
+    node_data: dict[str, Any],
+    factory: EventFactory,
+    event_filter: set[EventType] | None,
 ) -> AsyncIterator[StreamEvent]:
     """Process a node update and yield appropriate StreamEvent objects.
 
-    Args:
-        node_name: Name of the graph node that produced the update.
-        node_data: Data dictionary from the node.
-        execution_id: Parent execution identifier.
-
-    Yields:
-        StreamEvent objects based on the node update.
+    Checks event filter BEFORE creating events to avoid unnecessary allocations.
     """
     if node_name == "analyze_and_plan":
-        if workflow := node_data.get("workflow"):
-            yield StreamEvent(
-                type="workflow_selected",
-                data={
-                    "workflow": workflow,
-                    "complexity": node_data.get("complexity"),
-                    "execution_id": execution_id,
-                    "task_assignments": node_data.get("task_assignments", []),
-                    "parallel_strategy": node_data.get("parallel_strategy", "none"),
-                    "total_instances": node_data.get("total_instances", 1),
-                },
-                timestamp=time.time(),
-            )
-
-    elif node_name == "execute_instance":
-        # Instance execution results
-        if results := node_data.get("agent_results"):
-            for result in results:
-                yield StreamEvent(
-                    type="instance_result",
-                    data={
-                        "instance_id": result.get("instance_id"),
-                        "agent_id": result.get("agent_id"),
-                        "result": result.get("result"),
-                        "error": result.get("error"),
-                        "execution_id": execution_id,
-                    },
-                    timestamp=time.time(),
-                    agent_id=result.get("agent_id"),
+        # Planning start (when workflow not yet determined)
+        if "workflow" not in node_data and "complexity" not in node_data:
+            # Check filter before creating planning_start event
+            if _should_emit(EventType.PLANNING_START, event_filter):
+                agents_info = [
+                    {"name": getattr(a, "name", f"agent_{i}")}
+                    for i, a in enumerate(node_data.get("agents", []))
+                ]
+                yield factory.planning_start(
+                    prompt=node_data.get("prompt", ""),
+                    available_agents=agents_info,
                 )
 
-    elif node_name in ("router_workflow", "supervisor_workflow", "parliament_workflow"):
-        # Events are emitted via emit_event() during workflow execution
-        pass
+        # Planning complete (when workflow is determined)
+        if workflow := node_data.get("workflow"):
+            # Check filter before creating phase_change event
+            if _should_emit(EventType.PHASE_CHANGE, event_filter):
+                yield factory.phase_change(
+                    EventPhase.ANALYZING, EventPhase.EXECUTING, 30, "Planning complete"
+                )
+
+            # Check filter before creating planning_complete event
+            if _should_emit(EventType.PLANNING_COMPLETE, event_filter):
+                yield factory.planning_complete(
+                    complexity=node_data.get("complexity", ""),
+                    workflow=workflow,
+                    reasoning=node_data.get("reasoning", ""),
+                    task_assignments=node_data.get("task_assignments", []),
+                    parallel_strategy=node_data.get("parallel_strategy"),
+                    total_instances=node_data.get("total_instances", 0),
+                )
+
+            # Check filter before creating workflow_selected event
+            if _should_emit(EventType.WORKFLOW_SELECTED, event_filter):
+                yield factory.workflow_selected(
+                    workflow=workflow,
+                    complexity=node_data.get("complexity", ""),
+                    task_assignments=node_data.get("task_assignments", []),
+                    parallel_strategy=node_data.get("parallel_strategy"),
+                    total_instances=node_data.get("total_instances", 1),
+                )
 
     elif node_name == "synthesize_results":
         final_result = node_data.get("final_result", "")
         partial_info = node_data.get("partial_result_info", {})
 
         if final_result is not None:
-            citations = node_data.get("citations") or _extract_citations_from_result(
-                final_result or ""
-            )
-            event_data = {
-                "result": final_result,
-                "citations": citations,
-                "execution_id": execution_id,
-            }
-
-            if partial_info:
-                event_data.update(
-                    {
-                        "partial_result": partial_info.get("is_partial", False),
-                        "success_count": partial_info.get("success_count", 0),
-                        "failure_count": partial_info.get("failure_count", 0),
-                    }
+            is_executing = factory.current_phase == EventPhase.EXECUTING
+            # Check filter before creating phase_change event
+            if is_executing and _should_emit(EventType.PHASE_CHANGE, event_filter):
+                yield factory.phase_change(
+                    EventPhase.EXECUTING, EventPhase.SYNTHESIZING, 75, "Synthesizing"
                 )
-                if partial_info.get("failed"):
-                    event_data["failed_agents"] = [
-                        f["agent_id"] for f in partial_info["failed"]
-                    ]
 
-            yield StreamEvent(
-                type="final_result", data=event_data, timestamp=time.time()
-            )
+            success_count = partial_info.get("success_count", 0)
+            failure_count = partial_info.get("failure_count", 0)
+
+            # Check filter before creating synthesis_start event
+            if _should_emit(EventType.SYNTHESIS_START, event_filter):
+                yield factory.synthesis_start(
+                    success_count + failure_count, success_count, failure_count
+                )
+
+            # Check filter before creating synthesis_complete event
+            if _should_emit(EventType.SYNTHESIS_COMPLETE, event_filter):
+                citations = node_data.get("citations") or _extract_citations(
+                    final_result or ""
+                )
+                yield factory.synthesis_complete(
+                    result=final_result,
+                    citations=[str(c) for c in citations] if citations else [],
+                    is_partial=partial_info.get("is_partial", False),
+                    duration_ms=0,
+                )
+
+            # Check filter before creating phase_change event
+            if _should_emit(EventType.PHASE_CHANGE, event_filter):
+                yield factory.phase_change(
+                    EventPhase.SYNTHESIZING, EventPhase.COMPLETE, 100, "Complete"
+                )
 
 
-def _extract_citations_from_result(result: str) -> list[dict[str, str]]:
-    """Extract citations from the final result text.
-
-    Args:
-        result: The final result string.
-
-    Returns:
-        List of citation dictionaries.
-    """
+def _extract_citations(result: str) -> list[dict[str, str]]:
+    """Extract citations from the final result text."""
     from kiva.nodes.synthesize import extract_citations
 
     return extract_citations(result)

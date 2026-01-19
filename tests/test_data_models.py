@@ -1,6 +1,6 @@
 """Unit tests for data models: StreamEvent and exceptions."""
 
-from kiva.events import StreamEvent
+from kiva.events import EventPhase, EventSeverity, EventType, StreamEvent
 from kiva.exceptions import (
     AgentError,
     ConfigurationError,
@@ -15,47 +15,54 @@ class TestStreamEvent:
     def test_create_stream_event_with_all_fields(self):
         """Test creating StreamEvent with all fields."""
         event = StreamEvent(
-            type="token",
+            type=EventType.TOKEN,
             data={"content": "hello"},
+            execution_id="exec-123",
             timestamp=1234567890.0,
             agent_id="agent_1",
         )
-        assert event.type == "token"
+        assert event.type == EventType.TOKEN
         assert event.data == {"content": "hello"}
         assert event.timestamp == 1234567890.0
         assert event.agent_id == "agent_1"
+        assert event.execution_id == "exec-123"
 
     def test_create_stream_event_without_agent_id(self):
         """Test creating StreamEvent without agent_id (defaults to None)."""
         event = StreamEvent(
-            type="workflow_selected",
+            type=EventType.WORKFLOW_SELECTED,
             data={"workflow": "router"},
+            execution_id="exec-123",
             timestamp=1234567890.0,
         )
-        assert event.type == "workflow_selected"
+        assert event.type == EventType.WORKFLOW_SELECTED
         assert event.agent_id is None
 
     def test_to_dict_method(self):
         """Test StreamEvent.to_dict() serialization."""
         event = StreamEvent(
-            type="agent_end",
+            type=EventType.AGENT_END,
             data={"result": "success"},
+            execution_id="exec-123",
             timestamp=1234567890.0,
             agent_id="worker_1",
         )
         result = event.to_dict()
-        assert result == {
-            "type": "agent_end",
-            "data": {"result": "success"},
-            "timestamp": 1234567890.0,
-            "agent_id": "worker_1",
-        }
+        assert result["type"] == "agent_end"
+        assert result["data"] == {"result": "success"}
+        assert result["timestamp"] == 1234567890.0
+        assert result["agent_id"] == "worker_1"
+        assert result["execution_id"] == "exec-123"
+        assert "timestamp_iso" in result
+        assert result["phase"] == "initializing"
+        assert result["severity"] == "info"
 
     def test_to_dict_with_none_agent_id(self):
         """Test to_dict() when agent_id is None."""
         event = StreamEvent(
-            type="final_result",
+            type=EventType.SYNTHESIS_COMPLETE,
             data={"result": "done"},
+            execution_id="exec-123",
             timestamp=1234567890.0,
         )
         result = event.to_dict()

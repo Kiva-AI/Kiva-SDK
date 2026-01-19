@@ -82,8 +82,12 @@ kiva = Kiva(base_url="...", api_key="...", model="gpt-4o")
 kiva.include_router(weather_router)
 kiva.include_router(math_router)
 
-# 运行
-kiva.run("北京天气怎么样？顺便算一下 15 * 8")
+# Method 1: Rich console output
+result = await kiva.run("北京天气怎么样？顺便算一下 15 * 8")
+
+# Method 2: Stream events
+async for event in kiva.stream("北京天气"):
+    print(event.type.value)
 ```
 
 ## 前缀命名
@@ -192,6 +196,7 @@ class Calculator:
 ### main.py
 
 ```python
+import asyncio
 from kiva import Kiva
 from agents.weather import router as weather_router
 from agents.math import router as math_router
@@ -208,9 +213,19 @@ def create_app() -> Kiva:
     
     return kiva
 
-if __name__ == "__main__":
+async def main():
     app = create_app()
-    app.run("北京天气如何？计算 100 / 4")
+    
+    # Method 1: Rich console output
+    result = await app.run("北京天气如何？计算 100 / 4")
+    print(result)
+    
+    # Method 2: Stream events
+    async for event in app.stream("计算 15 + 8"):
+        print(f"{event.type.value}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 ## API 参考
@@ -258,7 +273,10 @@ def include_router(
 4. **链式调用**：`include_router` 返回 `self`，支持链式调用
 
 ```python
-kiva.include_router(weather_router) \
-    .include_router(math_router) \
-    .include_router(search_router)
+kiva.include_router(weather_router)
+kiva.include_router(math_router)
+kiva.include_router(search_router)
+
+# 运行
+await kiva.run("...")
 ```

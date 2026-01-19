@@ -40,6 +40,15 @@ Example:
 # High-level API (public)
 from kiva.client import Kiva
 
+# Events (public)
+from kiva.events import (
+    EventFactory,
+    EventPhase,
+    EventSeverity,
+    EventType,
+    StreamEvent,
+)
+
 # Exceptions (public)
 from kiva.exceptions import (
     AgentError,
@@ -53,6 +62,12 @@ __all__ = [
     # High-level API
     "Kiva",
     "AgentRouter",
+    # Events
+    "EventFactory",
+    "EventPhase",
+    "EventSeverity",
+    "EventType",
+    "StreamEvent",
     # Exceptions
     "SDKError",
     "ConfigurationError",

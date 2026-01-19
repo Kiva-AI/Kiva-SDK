@@ -118,6 +118,7 @@ workflow_selected (parallel_strategy: fan_out, total_instances: 3)
 Control parallelization via the Kiva client:
 
 ```python
+import asyncio
 from kiva import Kiva
 
 kiva = Kiva(base_url="...", api_key="...", model="gpt-4o")
@@ -126,13 +127,22 @@ kiva = Kiva(base_url="...", api_key="...", model="gpt-4o")
 def search(query: str) -> str:
     return f"Results for: {query}"
 
-# The planner automatically decides parallelization
-result = kiva.run("Search for 10 different topics")
+async def main():
+    # Method 1: Rich console output
+    result = await kiva.run("Search for 10 different topics")
+    
+    # Method 2: Stream events to monitor instances
+    async for event in kiva.stream("Search for 10 different topics"):
+        if event.type.value.startswith("instance_"):
+            print(f"{event.type.value}: {event.data}")
+
+asyncio.run(main())
 ```
 
 ## Example
 
 ```python
+import asyncio
 from kiva import Kiva
 
 kiva = Kiva(base_url="...", api_key="...", model="gpt-4o")
@@ -142,11 +152,14 @@ def research(topic: str) -> str:
     """Research a specific topic."""
     return f"Research results for {topic}"
 
-# The planner will automatically spawn multiple instances
-# if the task requires parallel research
-result = kiva.run(
-    "Research the following topics: AI, blockchain, quantum computing"
-)
+async def main():
+    # Rich console output
+    result = await kiva.run(
+        "Research the following topics: AI, blockchain, quantum computing"
+    )
+    print(result)
+
+asyncio.run(main())
 ```
 
 ## State Types
@@ -202,7 +215,7 @@ class PlanningResult(TypedDict, total=False):
 
 ## Rich Console Display
 
-When using `run_with_console()`, parallel instances are displayed with:
+When using `kiva.run()`, parallel instances are displayed with:
 
 - **Workflow Info Panel**: Shows parallel strategy and total instance count
 - **Agent Instances Table**: Displays each instance with:

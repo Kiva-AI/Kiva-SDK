@@ -15,7 +15,8 @@ from typing import Any
 
 from kiva.state import OrchestratorState
 from kiva.workflows.utils import (
-    emit_event,
+    create_workflow_factory,
+    emit_stream_event,
     extract_content,
     generate_invocation_id,
     get_agent_by_id,
@@ -62,6 +63,10 @@ async def router_workflow(state: OrchestratorState) -> dict[str, Any]:
     task = assignment.get("task", state.get("prompt", ""))
     invocation_id = generate_invocation_id(execution_id, agent_id)
 
+    # Create factory for event emission
+    factory = create_workflow_factory(execution_id)
+    workflow_start_time = time.time()
+
     # Router uses fallback_first=True to ensure a valid agent is selected
     agent = get_agent_by_id(agents, agent_id, fallback_first=True)
     if agent is None:
@@ -76,30 +81,55 @@ async def router_workflow(state: OrchestratorState) -> dict[str, Any]:
             ]
         }
 
+    # Emit workflow_start event
+    emit_stream_event(
+        factory.workflow_start(
+            workflow="router",
+            agent_ids=[agent_id],
+            iteration=1,
+        )
+    )
+
     try:
-        emit_event(
-            {
-                "type": "agent_start",
-                "agent_id": agent_id,
-                "invocation_id": invocation_id,
-                "execution_id": execution_id,
-                "task": task,
-                "timestamp": time.time(),
-            }
+        agent_start_time = time.time()
+
+        # Emit agent_start event
+        emit_stream_event(
+            factory.agent_start(
+                agent_id=agent_id,
+                invocation_id=invocation_id,
+                task=task,
+                iteration=1,
+            )
         )
 
         result = await agent.ainvoke({"messages": [{"role": "user", "content": task}]})
         content = extract_content(result)
 
-        emit_event(
-            {
-                "type": "agent_end",
-                "agent_id": agent_id,
-                "invocation_id": invocation_id,
-                "execution_id": execution_id,
-                "result": content,
-                "timestamp": time.time(),
-            }
+        agent_duration_ms = int((time.time() - agent_start_time) * 1000)
+
+        # Emit agent_end event
+        emit_stream_event(
+            factory.agent_end(
+                agent_id=agent_id,
+                invocation_id=invocation_id,
+                result=content[:500] if content else "",
+                duration_ms=agent_duration_ms,
+                success=True,
+            )
+        )
+
+        workflow_duration_ms = int((time.time() - workflow_start_time) * 1000)
+
+        # Emit workflow_end event
+        emit_stream_event(
+            factory.workflow_end(
+                workflow="router",
+                success=True,
+                results_count=1,
+                duration_ms=workflow_duration_ms,
+                conflicts_found=0,
+            )
         )
 
         return {
@@ -116,6 +146,31 @@ async def router_workflow(state: OrchestratorState) -> dict[str, Any]:
         from kiva.exceptions import wrap_agent_error
 
         error = wrap_agent_error(e, agent_id, task)
+
+        # Emit agent_error event
+        emit_stream_event(
+            factory.agent_error(
+                agent_id=agent_id,
+                invocation_id=invocation_id,
+                error_type=type(e).__name__,
+                error_message=str(error),
+                recovery_suggestion=error.recovery_suggestion,
+            )
+        )
+
+        workflow_duration_ms = int((time.time() - workflow_start_time) * 1000)
+
+        # Emit workflow_end event with failure
+        emit_stream_event(
+            factory.workflow_end(
+                workflow="router",
+                success=False,
+                results_count=0,
+                duration_ms=workflow_duration_ms,
+                conflicts_found=0,
+            )
+        )
+
         return {
             "agent_results": [
                 {

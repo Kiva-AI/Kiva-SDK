@@ -17,8 +17,10 @@ from typing import Any
 
 from kiva.state import OrchestratorState
 from kiva.workflows.utils import (
-    emit_event,
+    create_workflow_factory,
+    emit_stream_event,
     execute_single_agent,
+    generate_batch_id,
     generate_invocation_id,
     get_agent_by_id,
     make_error_result,
@@ -119,7 +121,10 @@ def _create_conflict_resolution_tasks(
 
 
 async def _execute_agents_parallel(
-    task_assignments: list[dict], agents: list, execution_id: str, prompt: str
+    task_assignments: list[dict],
+    agents: list,
+    execution_id: str,
+    prompt: str,
 ) -> list[dict]:
     """Execute multiple agents in parallel and collect results.
 
@@ -198,6 +203,8 @@ async def parliament_workflow(state: OrchestratorState) -> dict[str, Any]:
     prompt = state.get("prompt", "")
     execution_id = state.get("execution_id", "")
 
+    factory = create_workflow_factory(execution_id)
+
     if iteration >= max_iterations:
         return {"workflow": "synthesize", "iteration": iteration}
 
@@ -232,14 +239,26 @@ async def parliament_workflow(state: OrchestratorState) -> dict[str, Any]:
         agent_ids = [
             a.get("agent_id", f"agent_{i}") for i, a in enumerate(task_assignments)
         ]
-        emit_event(
-            {
-                "type": "parallel_start",
-                "agent_ids": agent_ids,
-                "iteration": iteration,
-                "execution_id": execution_id,
-                "timestamp": time.time(),
-            }
+        batch_id = generate_batch_id(execution_id)
+        batch_start_time = time.time()
+
+        # Emit workflow_start event
+        emit_stream_event(
+            factory.workflow_start(
+                workflow="parliament",
+                agent_ids=agent_ids,
+                iteration=iteration + 1,
+            )
+        )
+
+        # Emit parallel_start event
+        emit_stream_event(
+            factory.parallel_start(
+                batch_id=batch_id,
+                agent_ids=agent_ids,
+                instance_count=len(agent_ids),
+                strategy="parliament",
+            )
         )
 
         agent_results = await _execute_agents_parallel(
@@ -247,21 +266,35 @@ async def parliament_workflow(state: OrchestratorState) -> dict[str, Any]:
         )
         conflicts = _identify_conflicts(agent_results)
 
-        emit_event(
-            {
-                "type": "parallel_complete",
-                "results": [
+        batch_duration_ms = int((time.time() - batch_start_time) * 1000)
+        success_count = sum(1 for r in agent_results if r.get("error") is None)
+        failure_count = len(agent_results) - success_count
+
+        # Emit parallel_complete event
+        emit_stream_event(
+            factory.parallel_complete(
+                batch_id=batch_id,
+                results=[
                     {"agent_id": r.get("agent_id"), "success": r.get("error") is None}
                     for r in agent_results
                 ],
-                "conflicts_found": len(conflicts),
-                "iteration": iteration,
-                "execution_id": execution_id,
-                "timestamp": time.time(),
-            }
+                success_count=success_count,
+                failure_count=failure_count,
+                duration_ms=batch_duration_ms,
+            )
         )
 
         if not conflicts:
+            # Emit workflow_end event
+            emit_stream_event(
+                factory.workflow_end(
+                    workflow="parliament",
+                    success=True,
+                    results_count=len(agent_results),
+                    duration_ms=batch_duration_ms,
+                    conflicts_found=0,
+                )
+            )
             return {
                 "agent_results": agent_results,
                 "conflicts": [],
@@ -285,15 +318,26 @@ async def parliament_workflow(state: OrchestratorState) -> dict[str, Any]:
             return {"workflow": "synthesize", "iteration": iteration}
 
         agent_ids = [t.get("agent_id") for t in resolution_tasks]
-        emit_event(
-            {
-                "type": "parallel_start",
-                "agent_ids": agent_ids,
-                "iteration": iteration,
-                "phase": "conflict_resolution",
-                "execution_id": execution_id,
-                "timestamp": time.time(),
-            }
+        batch_id = generate_batch_id(execution_id)
+        batch_start_time = time.time()
+
+        # Emit workflow_start for conflict resolution iteration
+        emit_stream_event(
+            factory.workflow_start(
+                workflow="parliament",
+                agent_ids=agent_ids,
+                iteration=iteration + 1,
+            )
+        )
+
+        # Emit parallel_start event
+        emit_stream_event(
+            factory.parallel_start(
+                batch_id=batch_id,
+                agent_ids=agent_ids,
+                instance_count=len(agent_ids),
+                strategy="conflict_resolution",
+            )
         )
 
         new_results = await _execute_agents_parallel(
@@ -313,21 +357,35 @@ async def parliament_workflow(state: OrchestratorState) -> dict[str, Any]:
 
         new_conflicts = _identify_conflicts(merged_results)
 
-        emit_event(
-            {
-                "type": "parallel_complete",
-                "results": [
+        batch_duration_ms = int((time.time() - batch_start_time) * 1000)
+        success_count = sum(1 for r in new_results if r.get("error") is None)
+        failure_count = len(new_results) - success_count
+
+        # Emit parallel_complete event
+        emit_stream_event(
+            factory.parallel_complete(
+                batch_id=batch_id,
+                results=[
                     {"agent_id": r.get("agent_id"), "success": r.get("error") is None}
                     for r in new_results
                 ],
-                "conflicts_remaining": len(new_conflicts),
-                "iteration": iteration,
-                "execution_id": execution_id,
-                "timestamp": time.time(),
-            }
+                success_count=success_count,
+                failure_count=failure_count,
+                duration_ms=batch_duration_ms,
+            )
         )
 
         if not new_conflicts or iteration + 1 >= max_iterations:
+            # Emit workflow_end event
+            emit_stream_event(
+                factory.workflow_end(
+                    workflow="parliament",
+                    success=True,
+                    results_count=len(merged_results),
+                    duration_ms=batch_duration_ms,
+                    conflicts_found=len(new_conflicts),
+                )
+            )
             return {
                 "agent_results": merged_results,
                 "conflicts": new_conflicts,

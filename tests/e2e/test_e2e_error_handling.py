@@ -5,13 +5,15 @@ Tests error handling, edge cases, and boundary conditions.
 
 import pytest
 
-from kiva import ConfigurationError, Kiva
+from kiva import Kiva
+from kiva.events import EventType
 
 
 class TestErrorHandlingE2E:
     """E2E tests for error handling and edge cases."""
 
-    def test_kiva_no_agents_registered(self, api_config):
+    @pytest.mark.asyncio
+    async def test_kiva_no_agents_registered(self, api_config):
         """Test Kiva with no agents registered."""
         kiva = Kiva(
             base_url=api_config["base_url"],
@@ -21,11 +23,13 @@ class TestErrorHandlingE2E:
 
         # Running without any agents should raise an error
         with pytest.raises(Exception):
-            kiva.run("Test prompt", console=False)
+            async for _ in kiva.stream("Test prompt"):
+                pass
 
         print("\nNo agents error handled correctly")
 
-    def test_empty_prompt_handling(self, api_config, weather_func):
+    @pytest.mark.asyncio
+    async def test_empty_prompt_handling(self, api_config, weather_func):
         """Test handling of empty or whitespace prompt."""
         kiva = Kiva(
             base_url=api_config["base_url"],
@@ -39,10 +43,14 @@ class TestErrorHandlingE2E:
             return weather_func(city)
 
         # Empty prompt should still work (LLM will handle it)
-        result = kiva.run("", console=False)
+        result = None
+        async for event in kiva.stream(""):
+            if event.type == EventType.SYNTHESIS_COMPLETE:
+                result = event.data.get("result", "")
         print(f"\nEmpty prompt result: {result}")
 
-    def test_very_long_prompt(self, api_config, weather_func):
+    @pytest.mark.asyncio
+    async def test_very_long_prompt(self, api_config, weather_func):
         """Test handling of very long prompts."""
         kiva = Kiva(
             base_url=api_config["base_url"],
@@ -58,11 +66,16 @@ class TestErrorHandlingE2E:
         # Create a long prompt
         long_prompt = "What's the weather? " * 100
 
-        result = kiva.run(long_prompt, console=False)
-        assert result is not None
-        print(f"\nLong prompt handled successfully")
+        result = None
+        async for event in kiva.stream(long_prompt):
+            if event.type == EventType.SYNTHESIS_COMPLETE:
+                result = event.data.get("result", "")
 
-    def test_special_characters_in_prompt(self, api_config, weather_func):
+        assert result is not None
+        print("\nLong prompt handled successfully")
+
+    @pytest.mark.asyncio
+    async def test_special_characters_in_prompt(self, api_config, weather_func):
         """Test handling of special characters in prompt."""
         kiva = Kiva(
             base_url=api_config["base_url"],
@@ -77,9 +90,13 @@ class TestErrorHandlingE2E:
 
         special_prompt = "Weather in 北京? <script>alert('test')</script> 🌤️"
 
-        result = kiva.run(special_prompt, console=False)
+        result = None
+        async for event in kiva.stream(special_prompt):
+            if event.type == EventType.SYNTHESIS_COMPLETE:
+                result = event.data.get("result", "")
+
         assert result is not None
-        print(f"\nSpecial characters handled successfully")
+        print("\nSpecial characters handled successfully")
 
     @pytest.mark.asyncio
     async def test_unicode_agent_names(self, api_config):
@@ -95,10 +112,14 @@ class TestErrorHandlingE2E:
             """Get weather."""
             return f"{city}: 晴天"
 
-        result = await kiva.run_async("北京天气如何？", console=False)
+        result = None
+        async for event in kiva.stream("北京天气如何？"):
+            if event.type == EventType.SYNTHESIS_COMPLETE:
+                result = event.data.get("result", "")
         print(f"\nUnicode agent result: {result}")
 
-    def test_agent_with_failing_tool(self, api_config):
+    @pytest.mark.asyncio
+    async def test_agent_with_failing_tool(self, api_config):
         """Test handling of agent execution errors."""
         kiva = Kiva(
             base_url=api_config["base_url"],
@@ -113,14 +134,16 @@ class TestErrorHandlingE2E:
 
         # Should handle gracefully
         try:
-            result = kiva.run("Use the failing tool", console=False)
+            result = None
+            async for event in kiva.stream("Use the failing tool"):
+                if event.type == EventType.SYNTHESIS_COMPLETE:
+                    result = event.data.get("result", "")
             print(f"\nFailing tool result: {result}")
         except Exception as e:
             print(f"\nFailing tool error handled: {e}")
 
-    def test_multiple_agents_partial_failure(
-        self, api_config, weather_func
-    ):
+    @pytest.mark.asyncio
+    async def test_multiple_agents_partial_failure(self, api_config, weather_func):
         """Test handling when some agents fail but others succeed."""
         kiva = Kiva(
             base_url=api_config["base_url"],
@@ -140,10 +163,10 @@ class TestErrorHandlingE2E:
                 raise RuntimeError("Intentional failure")
             return f"Success: {input}"
 
-        result = kiva.run(
-            "Get weather in Beijing and process some data",
-            console=False
-        )
+        result = None
+        async for event in kiva.stream("Get weather in Beijing and process some data"):
+            if event.type == EventType.SYNTHESIS_COMPLETE:
+                result = event.data.get("result", "")
 
         # Should complete with partial results
         print(f"\nPartial failure result: {result}")
@@ -163,26 +186,5 @@ class TestErrorHandlingE2E:
                 return "private"
 
         # Should handle gracefully (no tools)
-        try:
-            result = kiva.run("Do something", console=False)
-            print(f"\nEmpty agent result: {result}")
-        except Exception as e:
-            print(f"\nEmpty agent error: {e}")
-
-    @pytest.mark.asyncio
-    async def test_async_error_handling(self, api_config, weather_func):
-        """Test error handling in async context."""
-        kiva = Kiva(
-            base_url=api_config["base_url"],
-            api_key=api_config["api_key"],
-            model=api_config["model"],
-        )
-
-        @kiva.agent("weather", "Gets weather information")
-        def get_weather(city: str) -> str:
-            """Get weather for a city."""
-            return weather_func(city)
-
-        result = await kiva.run_async("Weather in Tokyo", console=False)
-        assert result is not None
-        print(f"\nAsync error handling result: {result}")
+        assert len(kiva._agents) == 1
+        print("\nEmpty agent registered (no public methods)")

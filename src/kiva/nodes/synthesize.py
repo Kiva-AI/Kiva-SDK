@@ -2,14 +2,18 @@
 
 This module combines outputs from multiple worker agents into a unified
 final response, handling conflicts, partial results, and citation extraction.
+All LLM calls use async streaming for real-time token output.
 """
 
 import re
+import time
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
+from kiva.events import EventFactory, EventPhase
 from kiva.state import OrchestratorState
+from kiva.workflows.utils import emit_stream_event
 
 SYNTHESIZE_SYSTEM_PROMPT = """You are a result synthesis expert. \
 Based on multiple expert outputs, generate a unified final response.
@@ -44,14 +48,7 @@ Please generate the final response with source attribution."""
 
 
 def _format_agent_results(agent_results: list[dict]) -> str:
-    """Format agent results for the synthesis prompt.
-
-    Args:
-        agent_results: List of result dictionaries from agents.
-
-    Returns:
-        Formatted string representation of results.
-    """
+    """Format agent results for the synthesis prompt."""
     if not agent_results:
         return "No results available"
     return "\n\n---\n\n".join(
@@ -63,14 +60,7 @@ def _format_agent_results(agent_results: list[dict]) -> str:
 
 
 def _analyze_partial_results(agent_results: list[dict]) -> dict[str, Any]:
-    """Analyze agent results to identify successful and failed agents.
-
-    Args:
-        agent_results: List of result dictionaries from agents.
-
-    Returns:
-        Analysis dictionary with successful, failed, counts, and flags.
-    """
+    """Analyze agent results to identify successful and failed agents."""
     successful, failed = [], []
     for r in agent_results:
         agent_id = r.get("agent_id", "unknown")
@@ -97,17 +87,7 @@ def _analyze_partial_results(agent_results: list[dict]) -> dict[str, Any]:
 
 
 def extract_citations(text: str) -> list[dict[str, str]]:
-    """Extract citations from the final result text.
-
-    Identifies agent references in [agent_id] format and natural language
-    references like "According to agent_name".
-
-    Args:
-        text: The result text to extract citations from.
-
-    Returns:
-        List of citation dictionaries with source and type fields.
-    """
+    """Extract citations from the final result text."""
     citations, seen = [], set()
 
     for match in re.findall(r"\[([^\]]+)\]", text):
@@ -131,23 +111,40 @@ def extract_citations(text: str) -> list[dict[str, str]]:
 async def synthesize_results(state: OrchestratorState) -> dict[str, Any]:
     """Synthesize results from multiple worker agents into a final response.
 
-    Handles various scenarios including single results, multiple results
-    requiring synthesis, partial results with failures, and complete failures.
-
-    Args:
-        state: The orchestrator state containing agent_results and config.
-
-    Returns:
-        Dictionary with final_result, citations, messages, and partial_result_info.
+    Uses async streaming for real-time token output during LLM synthesis.
+    Emits synthesis_progress events for each token chunk.
     """
     from langchain_openai import ChatOpenAI
 
+    execution_id = state.get("execution_id", "")
+    factory = EventFactory(execution_id)
+    factory.set_phase(EventPhase.SYNTHESIZING)
+
+    start_time = time.time()
     agent_results = state.get("agent_results", [])
     analysis = _analyze_partial_results(agent_results)
 
+    emit_stream_event(
+        factory.synthesis_start(
+            input_count=analysis["total"],
+            successful_count=analysis["success_count"],
+            failed_count=analysis["failure_count"],
+        )
+    )
+
+    # Handle edge cases without LLM call
     if not agent_results:
+        result = "No results available from agents."
+        emit_stream_event(
+            factory.synthesis_complete(
+                result=result,
+                citations=[],
+                is_partial=False,
+                duration_ms=int((time.time() - start_time) * 1000),
+            )
+        )
         return {
-            "final_result": "No results available from agents.",
+            "final_result": result,
             "citations": [],
             "messages": [],
             "partial_result_info": analysis,
@@ -157,10 +154,17 @@ async def synthesize_results(state: OrchestratorState) -> dict[str, Any]:
         failed_summary = "\n".join(
             f"- {f['agent_id']}: {f['error']}" for f in analysis["failed"]
         )
+        result = f"All agents failed to execute.\n\nFailure details:\n{failed_summary}"
+        emit_stream_event(
+            factory.synthesis_complete(
+                result=result,
+                citations=[],
+                is_partial=True,
+                duration_ms=int((time.time() - start_time) * 1000),
+            )
+        )
         return {
-            "final_result": (
-                f"All agents failed to execute.\n\nFailure details:\n{failed_summary}"
-            ),
+            "final_result": result,
             "citations": [],
             "messages": [],
             "partial_result_info": analysis,
@@ -168,13 +172,23 @@ async def synthesize_results(state: OrchestratorState) -> dict[str, Any]:
 
     if len(analysis["successful"]) == 1 and not analysis["is_partial"]:
         result = analysis["successful"][0].get("result", "")
+        citations = extract_citations(result)
+        emit_stream_event(
+            factory.synthesis_complete(
+                result=result[:500] if result else "",
+                citations=[c["source"] for c in citations],
+                is_partial=False,
+                duration_ms=int((time.time() - start_time) * 1000),
+            )
+        )
         return {
             "final_result": result,
-            "citations": extract_citations(result),
+            "citations": citations,
             "messages": [],
             "partial_result_info": analysis,
         }
 
+    # Build model for streaming synthesis
     model_kwargs = {"model": state.get("model_name", "gpt-4o")}
     if api_key := state.get("api_key"):
         model_kwargs["api_key"] = api_key
@@ -195,19 +209,41 @@ async def synthesize_results(state: OrchestratorState) -> dict[str, Any]:
             agent_results=_format_agent_results(agent_results)
         )
 
-    response: AIMessage = await model.ainvoke(
-        [SystemMessage(content=system_prompt), HumanMessage(content=state["prompt"])]
-    )
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=state["prompt"]),
+    ]
 
-    citations = extract_citations(response.content)
+    # Stream synthesis with real-time token emission
+    accumulated_content = ""
+    async for chunk in model.astream(messages):
+        if content := chunk.content:
+            accumulated_content += content
+            emit_stream_event(
+                factory.synthesis_progress(
+                    content=content,
+                    accumulated_content=accumulated_content,
+                )
+            )
+
+    citations = extract_citations(accumulated_content)
     citation_sources = {c["source"] for c in citations}
     for r in analysis["successful"]:
         if (agent_id := r.get("agent_id")) and agent_id not in citation_sources:
             citations.append({"source": agent_id, "type": "agent"})
 
+    emit_stream_event(
+        factory.synthesis_complete(
+            result=accumulated_content[:500] if accumulated_content else "",
+            citations=[c["source"] for c in citations],
+            is_partial=analysis["is_partial"],
+            duration_ms=int((time.time() - start_time) * 1000),
+        )
+    )
+
     return {
-        "final_result": response.content,
+        "final_result": accumulated_content,
         "citations": citations,
-        "messages": [response],
+        "messages": [],
         "partial_result_info": analysis,
     }

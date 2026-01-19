@@ -6,12 +6,14 @@ Tests the supervisor workflow which coordinates multiple agents in parallel.
 import pytest
 
 from kiva import Kiva
+from kiva.events import EventType
 
 
 class TestSupervisorWorkflowE2E:
     """E2E tests for supervisor workflow with parallel agent execution."""
 
-    def test_supervisor_multi_agent_task(
+    @pytest.mark.asyncio
+    async def test_supervisor_multi_agent_task(
         self, api_config, weather_func, calculate_func
     ):
         """Test task requiring multiple agents executed in parallel."""
@@ -31,15 +33,18 @@ class TestSupervisorWorkflowE2E:
             """Calculate expression."""
             return calculate_func(expression)
 
-        result = kiva.run(
-            "What's the weather in Beijing? Also calculate 100 / 4",
-            console=False
-        )
+        result = None
+        async for event in kiva.stream(
+            "What's the weather in Beijing? Also calculate 100 / 4"
+        ):
+            if event.type == EventType.SYNTHESIS_COMPLETE:
+                result = event.data.get("result", "")
 
         assert result is not None
         print(f"\nMulti-Agent Result: {result}")
 
-    def test_supervisor_three_agents(
+    @pytest.mark.asyncio
+    async def test_supervisor_three_agents(
         self, api_config, weather_func, calculate_func, search_func
     ):
         """Test supervisor with three different agents."""
@@ -64,39 +69,12 @@ class TestSupervisorWorkflowE2E:
             """Search for information."""
             return search_func(query)
 
-        result = kiva.run(
-            "What's the weather in Paris? Calculate 25 * 4. Search for Python info.",
-            console=False
-        )
+        result = None
+        async for event in kiva.stream(
+            "What's the weather in Paris? Calculate 25 * 4. Search for Python info."
+        ):
+            if event.type == EventType.SYNTHESIS_COMPLETE:
+                result = event.data.get("result", "")
 
         assert result is not None
         print(f"\nThree Agents Result: {result}")
-
-    @pytest.mark.asyncio
-    async def test_supervisor_async_execution(
-        self, api_config, weather_func, calculate_func
-    ):
-        """Test async execution with supervisor workflow."""
-        kiva = Kiva(
-            base_url=api_config["base_url"],
-            api_key=api_config["api_key"],
-            model=api_config["model"],
-        )
-
-        @kiva.agent("weather", "Gets weather information")
-        def get_weather(city: str) -> str:
-            """Get weather for a city."""
-            return weather_func(city)
-
-        @kiva.agent("calculator", "Performs calculations")
-        def calculate(expression: str) -> str:
-            """Calculate expression."""
-            return calculate_func(expression)
-
-        result = await kiva.run_async(
-            "Get weather for New York and calculate 50 + 50",
-            console=False
-        )
-
-        assert result is not None
-        print(f"\nAsync Supervisor Result: {result}")

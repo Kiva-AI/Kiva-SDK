@@ -139,7 +139,7 @@ Test error handling and consistency:
 
 ```python
 @pytest.mark.asyncio
-async def test_scenario_name(self, api_config, create_weather_agent):
+async def test_scenario_name(self, api_config):
     """Test description."""
     from kiva import Kiva
     
@@ -153,16 +153,19 @@ async def test_scenario_name(self, api_config, create_weather_agent):
     def get_weather(city: str) -> str:
         return f"{city}: Sunny"
     
-    result = await kiva.run_async("Test prompt", console=False)
-    
-    # Assertions
+    # Method 1: Rich console output
+    result = await kiva.run("Test prompt")
     assert result is not None
+    
+    # Method 2: Stream events
+    async for event in kiva.stream("Test prompt"):
+        print(f"Event: {event.type.value}")
 ```
 
 ### Event Validation Pattern
 
 ```python
-# Using high-level API
+import asyncio
 from kiva import Kiva
 
 kiva = Kiva(base_url="...", api_key="...", model="gpt-4o")
@@ -171,8 +174,18 @@ kiva = Kiva(base_url="...", api_key="...", model="gpt-4o")
 def get_weather(city: str) -> str:
     return f"{city}: Sunny"
 
-result = await kiva.run_async("What's the weather?", console=False)
-assert result is not None
+async def main():
+    # Method 1: Rich console output
+    result = await kiva.run("What's the weather?")
+    assert result is not None
+    
+    # Method 2: Stream events
+    events = []
+    async for event in kiva.stream("What's the weather?"):
+        events.append(event)
+    assert any(e.type.value == "execution_end" for e in events)
+
+asyncio.run(main())
 ```
 
 ### Error Testing Pattern

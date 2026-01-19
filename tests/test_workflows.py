@@ -349,3 +349,461 @@ class TestShouldContinueParliament:
 
         result = should_continue_parliament(state)
         assert result == "synthesize"
+
+
+class TestWorkflowEventEmission:
+    """Tests for workflow event emission.
+
+    Validates: Requirements 6.1-6.3, 7.1-7.5, 8.1-8.6
+    """
+
+    def test_router_workflow_emits_workflow_events(self):
+        """Test that router workflow emits workflow_start and workflow_end events.
+
+        Validates: Requirements 6.2, 6.3
+        """
+        from unittest.mock import MagicMock, patch
+
+        from kiva.events import EventType
+
+        emitted_events = []
+
+        def capture_event(event):
+            if isinstance(event, dict):
+                emitted_events.append(event)
+
+        with patch("kiva.workflows.utils.get_stream_writer") as mock_writer:
+            mock_writer.return_value = capture_event
+
+            agent = MockAgent("test_agent", "Test response")
+            state = {
+                "agents": [agent],
+                "task_assignments": [{"agent_id": "test_agent", "task": "Test task"}],
+                "prompt": "Test prompt",
+                "execution_id": "exec-123",
+            }
+
+            asyncio.run(router_workflow(state))
+
+        # Verify workflow events were emitted
+        event_types = [e.get("type") for e in emitted_events]
+        assert EventType.WORKFLOW_START.value in event_types
+        assert EventType.WORKFLOW_END.value in event_types
+
+        # Verify workflow_start event data
+        workflow_start = next(
+            e for e in emitted_events if e.get("type") == EventType.WORKFLOW_START.value
+        )
+        assert workflow_start["data"]["workflow"] == "router"
+        assert "test_agent" in workflow_start["data"]["agent_ids"]
+
+        # Verify workflow_end event data
+        workflow_end = next(
+            e for e in emitted_events if e.get("type") == EventType.WORKFLOW_END.value
+        )
+        assert workflow_end["data"]["workflow"] == "router"
+        assert workflow_end["data"]["success"] is True
+
+    def test_router_workflow_emits_agent_events(self):
+        """Test that router workflow emits agent_start and agent_end events.
+
+        Validates: Requirements 7.1, 7.3
+        """
+        from unittest.mock import patch
+
+        from kiva.events import EventType
+
+        emitted_events = []
+
+        def capture_event(event):
+            if isinstance(event, dict):
+                emitted_events.append(event)
+
+        with patch("kiva.workflows.utils.get_stream_writer") as mock_writer:
+            mock_writer.return_value = capture_event
+
+            agent = MockAgent("test_agent", "Test response")
+            state = {
+                "agents": [agent],
+                "task_assignments": [{"agent_id": "test_agent", "task": "Test task"}],
+                "prompt": "Test prompt",
+                "execution_id": "exec-123",
+            }
+
+            asyncio.run(router_workflow(state))
+
+        # Verify agent events were emitted
+        event_types = [e.get("type") for e in emitted_events]
+        assert EventType.AGENT_START.value in event_types
+        assert EventType.AGENT_END.value in event_types
+
+        # Verify agent_start event data
+        agent_start = next(
+            e for e in emitted_events if e.get("type") == EventType.AGENT_START.value
+        )
+        assert agent_start["data"]["agent_id"] == "test_agent"
+        assert agent_start["data"]["task"] == "Test task"
+        assert "invocation_id" in agent_start["data"]
+
+        # Verify agent_end event data
+        agent_end = next(
+            e for e in emitted_events if e.get("type") == EventType.AGENT_END.value
+        )
+        assert agent_end["data"]["agent_id"] == "test_agent"
+        assert agent_end["data"]["success"] is True
+        assert "duration_ms" in agent_end["data"]
+
+    def test_router_workflow_emits_agent_error_on_failure(self):
+        """Test that router workflow emits agent_error event on failure.
+
+        Validates: Requirements 7.4
+        """
+        from unittest.mock import patch
+
+        from kiva.events import EventType
+
+        emitted_events = []
+
+        def capture_event(event):
+            if isinstance(event, dict):
+                emitted_events.append(event)
+
+        with patch("kiva.workflows.utils.get_stream_writer") as mock_writer:
+            mock_writer.return_value = capture_event
+
+            agent = FailingAgent("failing_agent", "Test error")
+            state = {
+                "agents": [agent],
+                "task_assignments": [{"agent_id": "failing_agent", "task": "Test task"}],
+                "prompt": "Test prompt",
+                "execution_id": "exec-123",
+            }
+
+            asyncio.run(router_workflow(state))
+
+        # Verify agent_error event was emitted
+        event_types = [e.get("type") for e in emitted_events]
+        assert EventType.AGENT_ERROR.value in event_types
+
+        # Verify agent_error event data
+        agent_error = next(
+            e for e in emitted_events if e.get("type") == EventType.AGENT_ERROR.value
+        )
+        assert agent_error["data"]["agent_id"] == "failing_agent"
+        assert agent_error["data"]["error_type"] == "RuntimeError"
+        assert "error_message" in agent_error["data"]
+
+    def test_supervisor_workflow_emits_parallel_events(self):
+        """Test that supervisor workflow emits parallel_start and parallel_complete events.
+
+        Validates: Requirements 9.1, 9.3
+        """
+        from unittest.mock import patch
+
+        from kiva.events import EventType
+
+        emitted_events = []
+
+        def capture_event(event):
+            if isinstance(event, dict):
+                emitted_events.append(event)
+
+        with patch("kiva.workflows.utils.get_stream_writer") as mock_writer:
+            mock_writer.return_value = capture_event
+
+            agents = [
+                MockAgent("agent_0", "Response 0"),
+                MockAgent("agent_1", "Response 1"),
+            ]
+            state = {
+                "agents": agents,
+                "task_assignments": [
+                    {"agent_id": "agent_0", "task": "Task 0"},
+                    {"agent_id": "agent_1", "task": "Task 1"},
+                ],
+                "prompt": "Test prompt",
+                "execution_id": "exec-123",
+                "max_parallel_agents": 5,
+            }
+
+            asyncio.run(supervisor_workflow(state))
+
+        # Verify parallel events were emitted
+        event_types = [e.get("type") for e in emitted_events]
+        assert EventType.PARALLEL_START.value in event_types
+        assert EventType.PARALLEL_COMPLETE.value in event_types
+
+        # Verify parallel_start event data
+        parallel_start = next(
+            e for e in emitted_events if e.get("type") == EventType.PARALLEL_START.value
+        )
+        assert "batch_id" in parallel_start["data"]
+        assert len(parallel_start["data"]["agent_ids"]) == 2
+
+        # Verify parallel_complete event data
+        parallel_complete = next(
+            e for e in emitted_events if e.get("type") == EventType.PARALLEL_COMPLETE.value
+        )
+        assert parallel_complete["data"]["success_count"] == 2
+        assert parallel_complete["data"]["failure_count"] == 0
+        assert "duration_ms" in parallel_complete["data"]
+
+    def test_supervisor_workflow_emits_agent_events_for_each_agent(self):
+        """Test that supervisor workflow emits agent events for each agent.
+
+        Validates: Requirements 7.1, 7.3
+        """
+        from unittest.mock import patch
+
+        from kiva.events import EventType
+
+        emitted_events = []
+
+        def capture_event(event):
+            if isinstance(event, dict):
+                emitted_events.append(event)
+
+        with patch("kiva.workflows.utils.get_stream_writer") as mock_writer:
+            mock_writer.return_value = capture_event
+
+            agents = [
+                MockAgent("agent_0", "Response 0"),
+                MockAgent("agent_1", "Response 1"),
+            ]
+            state = {
+                "agents": agents,
+                "task_assignments": [
+                    {"agent_id": "agent_0", "task": "Task 0"},
+                    {"agent_id": "agent_1", "task": "Task 1"},
+                ],
+                "prompt": "Test prompt",
+                "execution_id": "exec-123",
+            }
+
+            asyncio.run(supervisor_workflow(state))
+
+        # Count agent events
+        agent_starts = [
+            e for e in emitted_events if e.get("type") == EventType.AGENT_START.value
+        ]
+        agent_ends = [
+            e for e in emitted_events if e.get("type") == EventType.AGENT_END.value
+        ]
+
+        # Should have 2 agent_start and 2 agent_end events
+        assert len(agent_starts) == 2
+        assert len(agent_ends) == 2
+
+        # Verify both agents have events
+        start_agent_ids = {e["data"]["agent_id"] for e in agent_starts}
+        end_agent_ids = {e["data"]["agent_id"] for e in agent_ends}
+        assert start_agent_ids == {"agent_0", "agent_1"}
+        assert end_agent_ids == {"agent_0", "agent_1"}
+
+    @given(st.integers(min_value=2, max_value=4))
+    @settings(max_examples=50)
+    def test_supervisor_emits_correct_event_count(self, num_agents: int):
+        """Property: Supervisor emits correct number of agent events.
+
+        Validates: Requirements 7.1, 7.3
+        """
+        from unittest.mock import patch
+
+        from kiva.events import EventType
+
+        emitted_events = []
+
+        def capture_event(event):
+            if isinstance(event, dict):
+                emitted_events.append(event)
+
+        with patch("kiva.workflows.utils.get_stream_writer") as mock_writer:
+            mock_writer.return_value = capture_event
+
+            agents = [
+                MockAgent(f"agent_{i}", f"Response {i}") for i in range(num_agents)
+            ]
+            state = {
+                "agents": agents,
+                "task_assignments": [
+                    {"agent_id": f"agent_{i}", "task": f"Task {i}"}
+                    for i in range(num_agents)
+                ],
+                "prompt": "Test prompt",
+                "execution_id": "exec-123",
+            }
+
+            asyncio.run(supervisor_workflow(state))
+
+        # Count agent events
+        agent_starts = [
+            e for e in emitted_events if e.get("type") == EventType.AGENT_START.value
+        ]
+        agent_ends = [
+            e for e in emitted_events if e.get("type") == EventType.AGENT_END.value
+        ]
+
+        # Should have num_agents agent_start and agent_end events
+        assert len(agent_starts) == num_agents
+        assert len(agent_ends) == num_agents
+
+        # Clear for next iteration
+        emitted_events.clear()
+
+
+class TestInstanceEventEmission:
+    """Tests for instance event emission in workflows.
+
+    Validates: Requirements 8.1-8.6
+    """
+
+    def test_supervisor_with_instances_emits_instance_events(self):
+        """Test that supervisor with instances emits instance events.
+
+        Validates: Requirements 8.1, 8.2, 8.4
+        """
+        from unittest.mock import patch
+
+        from kiva.events import EventType
+
+        emitted_events = []
+
+        def capture_event(event):
+            if isinstance(event, dict):
+                emitted_events.append(event)
+
+        with patch("kiva.workflows.utils.get_stream_writer") as mock_writer:
+            mock_writer.return_value = capture_event
+
+            agent = MockAgent("agent_0", "Response")
+            state = {
+                "agents": [agent],
+                "task_assignments": [
+                    {"agent_id": "agent_0", "task": "Task", "instances": 2}
+                ],
+                "prompt": "Test prompt",
+                "execution_id": "exec-123",
+                "parallel_strategy": "fan_out",
+                "max_parallel_agents": 5,
+            }
+
+            asyncio.run(supervisor_workflow(state))
+
+        # Verify instance events were emitted
+        event_types = [e.get("type") for e in emitted_events]
+
+        # Should have instance_spawn, instance_start, instance_end events
+        assert EventType.INSTANCE_SPAWN.value in event_types
+        assert EventType.INSTANCE_START.value in event_types
+        assert EventType.INSTANCE_END.value in event_types
+
+        # Count instance events
+        instance_spawns = [
+            e for e in emitted_events if e.get("type") == EventType.INSTANCE_SPAWN.value
+        ]
+        instance_starts = [
+            e for e in emitted_events if e.get("type") == EventType.INSTANCE_START.value
+        ]
+        instance_ends = [
+            e for e in emitted_events if e.get("type") == EventType.INSTANCE_END.value
+        ]
+
+        # Should have 2 of each (2 instances)
+        assert len(instance_spawns) == 2
+        assert len(instance_starts) == 2
+        assert len(instance_ends) == 2
+
+    def test_instance_events_have_correct_ids(self):
+        """Test that instance events have correct instance_id and agent_id.
+
+        Validates: Requirements 8.1, 8.2, 8.4
+        """
+        from unittest.mock import patch
+
+        from kiva.events import EventType
+
+        emitted_events = []
+
+        def capture_event(event):
+            if isinstance(event, dict):
+                emitted_events.append(event)
+
+        with patch("kiva.workflows.utils.get_stream_writer") as mock_writer:
+            mock_writer.return_value = capture_event
+
+            agent = MockAgent("agent_0", "Response")
+            state = {
+                "agents": [agent],
+                "task_assignments": [
+                    {"agent_id": "agent_0", "task": "Task", "instances": 1}
+                ],
+                "prompt": "Test prompt",
+                "execution_id": "exec-123",
+                "parallel_strategy": "fan_out",
+            }
+
+            asyncio.run(supervisor_workflow(state))
+
+        # Get instance events
+        instance_events = [
+            e for e in emitted_events
+            if e.get("type") in [
+                EventType.INSTANCE_SPAWN.value,
+                EventType.INSTANCE_START.value,
+                EventType.INSTANCE_END.value,
+            ]
+        ]
+
+        # All instance events should have instance_id and agent_id
+        for event in instance_events:
+            assert event.get("instance_id") is not None or event["data"].get("instance_id") is not None
+            assert event.get("agent_id") is not None or event["data"].get("agent_id") is not None
+
+    @given(st.integers(min_value=1, max_value=3))
+    @settings(max_examples=30)
+    def test_instance_count_matches_configuration(self, num_instances: int):
+        """Property: Number of instance events matches configured instances.
+
+        Validates: Requirements 8.1, 8.2, 8.4
+        """
+        from unittest.mock import patch
+
+        from kiva.events import EventType
+
+        emitted_events = []
+
+        def capture_event(event):
+            if isinstance(event, dict):
+                emitted_events.append(event)
+
+        with patch("kiva.workflows.utils.get_stream_writer") as mock_writer:
+            mock_writer.return_value = capture_event
+
+            agent = MockAgent("agent_0", "Response")
+            state = {
+                "agents": [agent],
+                "task_assignments": [
+                    {"agent_id": "agent_0", "task": "Task", "instances": num_instances}
+                ],
+                "prompt": "Test prompt",
+                "execution_id": "exec-123",
+                "parallel_strategy": "fan_out",
+                "max_parallel_agents": 10,
+            }
+
+            asyncio.run(supervisor_workflow(state))
+
+        # Count instance events
+        instance_spawns = [
+            e for e in emitted_events if e.get("type") == EventType.INSTANCE_SPAWN.value
+        ]
+        instance_ends = [
+            e for e in emitted_events if e.get("type") == EventType.INSTANCE_END.value
+        ]
+
+        # Should match configured instance count
+        assert len(instance_spawns) == num_instances
+        assert len(instance_ends) == num_instances
+
+        # Clear for next iteration
+        emitted_events.clear()

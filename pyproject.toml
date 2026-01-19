@@ -1,6 +1,6 @@
 [project]
 name = "kiva-sdk"
-version = "0.3.3"
+version = "0.4.0"
 description = "A multi-agent orchestration SDK for building intelligent workflows"
 readme = "README.md"
 license = {text = "MIT"}
@@ -91,8 +91,11 @@ convention = "google"
 
 [dependency-groups]
 dev = [
+    "fastapi>=0.128.0",
     "hypothesis>=6.150.2",
+    "jinja2>=3.1.6",
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "ruff>=0.14.11",
+    "uvicorn>=0.40.0",
 ]
