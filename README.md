@@ -54,6 +54,37 @@ async def main():
 asyncio.run(main())
 ```
 
+## MCP 工具源注入
+
+```python
+from kiva import Kiva
+
+MCP_SERVERS = {
+    "math": {
+        "command": "python",
+        "args": ["/path/to/math_server.py"],
+        "transport": "stdio",
+    }
+}
+
+kiva = Kiva(
+    base_url="https://api.openai.com/v1",
+    api_key="your-api-key",
+    model="gpt-4o",
+)
+
+@kiva.agent("calculator", "Performs calculations", mcp_servers=MCP_SERVERS)
+class Calculator:
+    def add(self, a: int, b: int) -> int:
+        return a + b
+
+class SearchTools:
+    def search(self, query: str) -> str:
+        return f"Results for {query}"
+
+kiva.add_agent("search", "Searches for information", SearchTools, mcp_servers=MCP_SERVERS)
+```
+
 ## API
 
 ### `kiva.run(prompt)` - Rich Console Output

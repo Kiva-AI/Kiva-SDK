@@ -90,6 +90,30 @@ async for event in kiva.stream("北京天气"):
     print(event.type.value)
 ```
 
+## MCP 工具注入
+
+```python
+from kiva import AgentRouter, Kiva
+
+MCP_SERVERS = {
+    "math": {
+        "command": "python",
+        "args": ["/path/to/math_server.py"],
+        "transport": "stdio",
+    }
+}
+
+math_router = AgentRouter(prefix="math")
+
+@math_router.agent("calculator", "数学计算", mcp_servers=MCP_SERVERS)
+class Calculator:
+    def add(self, a: int, b: int) -> int:
+        return a + b
+
+kiva = Kiva(base_url="...", api_key="...", model="gpt-4o")
+kiva.include_router(math_router)
+```
+
 ## 前缀命名
 
 `AgentRouter` 的 `prefix` 参数会自动添加到所有 agent 名称前：

@@ -19,7 +19,7 @@ Example:
 
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from langchain.agents import create_agent
 from langchain_core.tools import tool as lc_tool
@@ -37,6 +37,7 @@ class Agent:
     name: str
     description: str
     tools: list
+    mcp_servers: dict[str, dict[str, Any]] | None = None
     _compiled: object = field(default=None, repr=False)
 
 
@@ -86,24 +87,61 @@ class Kiva:
                     tools.append(lc_tool(method))
             return tools
         elif isinstance(obj, list):
-            return [lc_tool(f) if not hasattr(f, "invoke") else f for f in obj]
+            tools = []
+            for item in obj:
+                if hasattr(item, "invoke"):
+                    tools.append(item)
+                elif callable(item) and not isinstance(item, type):
+                    tools.append(lc_tool(item))
+                elif isinstance(item, type):
+                    tools.extend(self._to_tools(item))
+                else:
+                    raise ValueError(f"Cannot convert {type(item)} to tools")
+            return tools
         else:
             raise ValueError(f"Cannot convert {type(obj)} to tools")
 
-    def agent(self, name: str, description: str) -> Callable:
+    def agent(
+        self,
+        name: str,
+        description: str,
+        *,
+        mcp_servers: dict[str, dict[str, Any]] | None = None,
+    ) -> Callable:
         """Decorator to register an agent."""
 
         def decorator(obj):
             tools = self._to_tools(obj)
-            self._agents.append(Agent(name=name, description=description, tools=tools))
+            self._agents.append(
+                Agent(
+                    name=name,
+                    description=description,
+                    tools=tools,
+                    mcp_servers=mcp_servers,
+                )
+            )
             return obj
 
         return decorator
 
-    def add_agent(self, name: str, description: str, tools: list) -> "Kiva":
+    def add_agent(
+        self,
+        name: str,
+        description: str,
+        tools,
+        *,
+        mcp_servers: dict[str, dict[str, Any]] | None = None,
+    ) -> "Kiva":
         """Add an agent with an explicit tools list."""
         converted = self._to_tools(tools)
-        self._agents.append(Agent(name=name, description=description, tools=converted))
+        self._agents.append(
+            Agent(
+                name=name,
+                description=description,
+                tools=converted,
+                mcp_servers=mcp_servers,
+            )
+        )
         return self
 
     def include_router(self, router: "AgentRouter", prefix: str = "") -> "Kiva":
@@ -112,15 +150,29 @@ class Kiva:
             name = f"{prefix}_{agent_def.name}" if prefix else agent_def.name
             tools = self._to_tools(agent_def.obj)
             self._agents.append(
-                Agent(name=name, description=agent_def.description, tools=tools)
+                Agent(
+                    name=name,
+                    description=agent_def.description,
+                    tools=tools,
+                    mcp_servers=agent_def.mcp_servers,
+                )
             )
         return self
 
-    def _build_agents(self) -> list:
+    async def _load_mcp_tools(self, mcp_servers: dict[str, dict[str, Any]]) -> list:
+        from langchain_mcp_adapters.client import MultiServerMCPClient
+
+        client = MultiServerMCPClient(mcp_servers)
+        return await client.get_tools()
+
+    async def _build_agents(self) -> list:
         """Build LangChain agents from registered agent definitions."""
         built = []
         for agent_def in self._agents:
-            agent = create_agent(model=self._create_model(), tools=agent_def.tools)
+            tools = list(agent_def.tools)
+            if agent_def.mcp_servers:
+                tools.extend(await self._load_mcp_tools(agent_def.mcp_servers))
+            agent = create_agent(model=self._create_model(), tools=tools)
             agent.name = agent_def.name
             agent.description = agent_def.description
             built.append(agent)
@@ -156,7 +208,7 @@ class Kiva:
 
         async for event in run(
             prompt=prompt,
-            agents=self._build_agents(),
+            agents=await self._build_agents(),
             base_url=self.base_url,
             api_key=self.api_key,
             model_name=self.model,

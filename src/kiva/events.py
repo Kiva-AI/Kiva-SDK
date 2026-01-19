@@ -186,7 +186,8 @@ class EventFactory:
         now = time.time()
         if now <= self._last_timestamp:
             # Ensure monotonic by adding small increment (1 microsecond)
-            # Using 1e-6 instead of 1e-9 to ensure float precision at typical timestamp magnitudes
+            # Using 1e-6 instead of 1e-9 to ensure float precision at typical
+            # timestamp magnitudes
             self._last_timestamp += 1e-6
         else:
             self._last_timestamp = now
