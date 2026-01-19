@@ -9,9 +9,9 @@ import asyncio
 
 from kiva import AgentRouter, Kiva
 
-API_BASE = "http://10.0.0.80:30000/v1"
-API_KEY = "YOUR_API_KEY"
-MODEL = "gpt-4o"
+API_BASE = ""
+API_KEY = ""
+MODEL = ""
 
 # Weather module
 weather_router = AgentRouter(prefix="weather")

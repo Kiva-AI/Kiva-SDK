@@ -9,9 +9,9 @@ import asyncio
 
 from kiva import Kiva
 
-API_BASE = "http://10.0.0.80:30000/v1"
-API_KEY = "YOUR_API_KEY"
-MODEL = "gpt-4o"
+API_BASE = ""
+API_KEY = ""
+MODEL = ""
 
 kiva = Kiva(base_url=API_BASE, api_key=API_KEY, model=MODEL)
 
@@ -31,12 +31,12 @@ class MathTools:
 
 async def main():
     # Method 1: Rich console output
-    result = await kiva.run("What's the weather in Beijing?")
-    print(f"Result: {result}")
+    await kiva.run("What's the weather in Beijing?")
+    #print(f"Result: {result}")
 
     # Method 2: Stream events
-    async for event in kiva.stream("What is 2 + 2?"):
-        print(f"Event: {event.type.value}")
+    # async for event in kiva.stream("What is 2 + 2?"):
+    #     print(f"Event: {event.type.value}")
 
 
 if __name__ == "__main__":
