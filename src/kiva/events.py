@@ -162,7 +162,7 @@ class EventFactory:
     Maintains monotonic timestamp guarantee for event ordering.
     """
 
-    __slots__ = ('execution_id', 'current_phase', 'start_time', '_last_timestamp')
+    __slots__ = ("execution_id", "current_phase", "start_time", "_last_timestamp")
 
     def __init__(self, execution_id: str) -> None:
         self.execution_id = execution_id

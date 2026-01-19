@@ -276,7 +276,9 @@ async def _process_stream_chunk(
                 # to ensure all events have strictly increasing timestamps
                 event = StreamEvent.from_dict(data)
                 # Override timestamp with monotonic timestamp from main factory
-                object.__setattr__(event, 'timestamp', factory._get_monotonic_timestamp())
+                object.__setattr__(
+                    event, "timestamp", factory._get_monotonic_timestamp()
+                )
                 yield event
         except (KeyError, ValueError):
             pass  # Ignore malformed events
