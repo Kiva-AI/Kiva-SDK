@@ -27,6 +27,7 @@ Example:
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -42,6 +43,7 @@ class AgentDefinition:
     name: str
     description: str
     obj: Callable | type
+    mcp_servers: dict[str, dict[str, Any]] | None = None
 
 
 class AgentRouter:
@@ -80,7 +82,13 @@ class AgentRouter:
             return f"{self.prefix}_{name}"
         return name
 
-    def agent(self, name: str, description: str) -> Callable:
+    def agent(
+        self,
+        name: str,
+        description: str,
+        *,
+        mcp_servers: dict[str, dict[str, Any]] | None = None,
+    ) -> Callable:
         """Decorator to register an agent with this router.
 
         Can decorate either a single function (becomes a single-tool agent)
@@ -89,6 +97,7 @@ class AgentRouter:
         Args:
             name: Unique identifier for the agent (will be prefixed).
             description: Human-readable description of the agent's purpose.
+            mcp_servers: MCP 服务器配置，会合并进该 agent 的工具源。
 
         Returns:
             Decorator function that registers the agent.
@@ -103,7 +112,12 @@ class AgentRouter:
         def decorator(obj: Callable | type) -> Callable | type:
             resolved_name = self._resolve_name(name)
             self._agents.append(
-                AgentDefinition(name=resolved_name, description=description, obj=obj)
+                AgentDefinition(
+                    name=resolved_name,
+                    description=description,
+                    obj=obj,
+                    mcp_servers=mcp_servers,
+                )
             )
             return obj
 
@@ -146,6 +160,7 @@ class AgentRouter:
                         name=resolved_name,
                         description=agent_def.description,
                         obj=agent_def.obj,
+                        mcp_servers=agent_def.mcp_servers,
                     )
                 )
 

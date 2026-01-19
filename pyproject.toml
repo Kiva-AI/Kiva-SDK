@@ -1,6 +1,6 @@
 [project]
 name = "kiva-sdk"
-version = "0.4.0"
+version = "0.5.0"
 description = "A multi-agent orchestration SDK for building intelligent workflows"
 readme = "README.md"
 license = {text = "MIT"}
@@ -34,6 +34,7 @@ classifiers = [
 ]
 dependencies = [
     "langchain>=1.2.4",
+    "langchain-mcp-adapters>=0.2.1",
     "langchain-openai>=1.1.7",
     "langgraph>=1.0.6",
     "rich>=14.2.0",
